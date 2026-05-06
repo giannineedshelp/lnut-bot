@@ -1,5 +1,5 @@
 import discord
-from discord import ui, ButtonStyle
+from discord import ui, ButtonStyle, app_commands
 from discord.ext import commands
 
 
@@ -24,12 +24,18 @@ class SettingsView(ui.View):
         await interaction.message.delete()
 
 
-def setup_settings_commands(bot: commands.Bot):
+class Settings(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
 
-    @bot.tree.command(name="settings", description="Open settings panel")
-    async def settings(interaction: discord.Interaction):
+    @app_commands.command(name="settings", description="Open settings panel")
+    async def settings(self, interaction: discord.Interaction):
         await interaction.response.send_message(
             "⚙️ Settings Panel",
             view=SettingsView(),
             ephemeral=True
         )
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(Settings(bot))

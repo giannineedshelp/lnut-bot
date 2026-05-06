@@ -181,15 +181,12 @@ class CoreCommands(commands.Cog):
             color=discord.Color.blue(),
         )
 
-        for hw in homeworks:
+        for hw in homeworks[:25]:
             name = hw.get("name", "Unnamed")
             hw_id = hw.get("id", "?")
             tasks = hw.get("tasks", [])
 
-            completed = sum(
-                1 for t in tasks if t.get("gameResults")
-            )
-
+            completed = sum(1 for t in tasks if t.get("gameResults"))
             total = len(tasks)
 
             lines = []
@@ -197,31 +194,18 @@ class CoreCommands(commands.Cog):
             for i, task in enumerate(tasks[:8]):
                 pct = "-"
                 if task.get("gameResults"):
-                    pct = task["gameResults"].get(
-                        "percentage",
-                        "-"
-                    )
+                    pct = task["gameResults"].get("percentage", "-")
 
-                task_name = task.get(
-                    "translation",
-                    "Unknown"
-                )
+                task_name = task.get("translation", "Unknown")
 
-                lines.append(
-                    f"`[{i}]` {task_name} — **{pct}%**"
-                )
+                lines.append(f"`[{i}]` {task_name} — **{pct}%**")
 
             if len(tasks) > 8:
-                lines.append(
-                    f"*...and {len(tasks)-8} more tasks*"
-                )
+                lines.append(f"*...and {len(tasks) - 8} more tasks*")
 
             embed.add_field(
                 name=f"{name} (ID: {hw_id})",
-                value=(
-                    f"Progress: {completed}/{total}\n"
-                    + "\n".join(lines)
-                ),
+                value=f"Progress: {completed}/{total}\n" + "\n".join(lines),
                 inline=False,
             )
 

@@ -1,3 +1,4 @@
+from email.mime import text
 import json
 import logging
 import math
@@ -51,7 +52,13 @@ class LNApiClient:
                 logger.error(f"API error {resp.status} on {endpoint}: {text[:200]}")
                 return {"error": True, "status": resp.status, "body": text[:500]}
             
-            return await resp.json()
+            text = await resp.text()
+
+        try:
+            return json.loads(text)
+        except Exception:
+            logger.error(f"Non-JSON response from {endpoint}: {text[:200]}")
+            return {"error": True, "body": text}
 
     async def login(self, username: str, password: str) -> str | None:
         """

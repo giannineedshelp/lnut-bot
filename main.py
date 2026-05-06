@@ -1,40 +1,30 @@
 import asyncio
 import logging
 import os
-import sys
+import time
+from pathlib import Path
 from dotenv import load_dotenv
 
 import discord
 from discord.ext import commands
 
 # =========================
-# PROJECT ROOT SETUP
+# PROJECT SETUP
 # =========================
-BASE_DIR = "/storage/emulated/0/Documents/In_bot"
-
-os.chdir(BASE_DIR)
-sys.path.insert(0, BASE_DIR)
-
-print("Running from:", os.getcwd())
-
-# =========================
-# LOAD ENV (ONLY ONCE)
-# =========================
-load_dotenv(".env", override=True)
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env", override=True)
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-print("TOKEN LOADED:", TOKEN)
 
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN missing in .env")
 
-# =========================
-# LOCAL IMPORTS (AFTER PATH FIX)
-# =========================
-from utils.logger import setup_logging
-from utils.encryption import get_fernet
 
-logger = setup_logging()
+# =========================
+# LOGGING
+# =========================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("lnut_bot")
 
 
 # =========================
@@ -50,29 +40,46 @@ class LanguageNutBot(commands.Bot):
             intents=intents,
             activity=discord.Activity(
                 type=discord.ActivityType.playing,
-                name="/login | LanguageNut Automator",
+                name="/login | LanguageNut Bot",
             ),
         )
 
+        # lightweight init ONLY (no heavy stuff here)
         self.aiohttp_session = None
-        self.fernet = get_fernet()
+        self.fernet = None
 
+    # =========================
+    # STARTUP HOOK (OPTIMISED)
+    # =========================
     async def setup_hook(self):
         import aiohttp
+        from utils.encryption import get_fernet
 
-        self.aiohttp_session = aiohttp.ClientSession(
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-                "Origin": "https://www.languagenut.com",
-                "Referer": "https://www.languagenut.com/",
-            }
-        )
+        start = time.time()
+        logger.info("Starting setup_hook...")
 
+        # 1. Async HTTP session (fast, non-blocking)
+        self.aiohttp_session = aiohttp.ClientSession()
+
+        # 2. Load encryption AFTER startup begins (not init)
+        self.fernet = get_fernet()
+
+        # 3. Load cogs (safe + sequential for stability)
         await self._load_cogs()
-        await self.tree.sync()
-        logger.info("Command tree synced")
 
+        logger.info(f"Cogs loaded in {time.time() - start:.2f}s")
+
+        # 4. Sync slash commands (separate step for clarity)
+        logger.info("Syncing application commands...")
+        try:
+            await self.tree.sync()
+            logger.info("Command sync complete")
+        except Exception as e:
+            logger.error(f"Command sync failed: {e}")
+
+    # =========================
+    # COG LOADER (STABLE)
+    # =========================
     async def _load_cogs(self):
         cogs = [
             "commands.core",
@@ -84,18 +91,22 @@ class LanguageNutBot(commands.Bot):
                 await self.load_extension(cog)
                 logger.info(f"Loaded cog: {cog}")
             except Exception as e:
-                logger.error(f"Failed to load cog {cog}: {e}")
+                logger.error(f"Failed to load {cog}: {e}")
 
+    # =========================
+    # READY EVENT
+    # =========================
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
-        logger.info("Bot is online")
+        logger.info("Bot is fully online")
 
 
 # =========================
-# MAIN START
+# CLEAN SHUTDOWN
 # =========================
 async def main():
     bot = LanguageNutBot()
+
     async with bot:
         await bot.start(TOKEN)
 
