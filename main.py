@@ -1,42 +1,53 @@
 import asyncio
+import logging
 import os
 import time
-import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
 import discord
 from discord.ext import commands
 
-from colorama import Fore, Style, init
-
 # =========================
-# COLORAMA SETUP
-# =========================
-init(autoreset=True)
-
-def log_info(msg): print(f"{Fore.CYAN}[INFO]{Style.RESET_ALL} {msg}")
-def log_good(msg): print(f"{Fore.GREEN}[OK]{Style.RESET_ALL} {msg}")
-def log_warn(msg): print(f"{Fore.YELLOW}[WARN]{Style.RESET_ALL} {msg}")
-def log_bad(msg): print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} {msg}")
-
-# =========================
-# LOAD ENV
+# ENV LOADER (UNIVERSAL)
 # =========================
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env", override=True)
+
+def load_environment():
+    possible_paths = [
+        BASE_DIR / ".env",                     # PC project root
+        Path(".env"),                          # current working dir
+        Path.home() / ".env",                 # server/home
+        Path("/storage/emulated/0/In_bot/.env"),  # Android/Pydroid
+    ]
+
+    for path in possible_paths:
+        if path.exists():
+            load_dotenv(path, override=True)
+            print(f"[ENV] Loaded from: {path}")
+            return
+
+    print("[WARN] No .env file found. Using system environment only.")
+
+load_environment()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not TOKEN:
-    log_bad("DISCORD_TOKEN missing in .env")
-    raise RuntimeError("Missing token")
+    raise RuntimeError("DISCORD_TOKEN missing (check .env or system env)")
+
+
+# =========================
+# LOGGING
+# =========================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("lnut_bot")
+
 
 # =========================
 # BOT CLASS
 # =========================
 class LanguageNutBot(commands.Bot):
-
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -46,8 +57,8 @@ class LanguageNutBot(commands.Bot):
             intents=intents,
             activity=discord.Activity(
                 type=discord.ActivityType.playing,
-                name="/login • LanguageNut"
-            )
+                name="/login | LanguageNut Bot",
+            ),
         )
 
         self.aiohttp_session = None
@@ -61,28 +72,20 @@ class LanguageNutBot(commands.Bot):
         from utils.encryption import get_fernet
 
         start = time.time()
-        log_info("Booting bot...")
+        logger.info("Starting setup_hook...")
 
-        # HTTP session
         self.aiohttp_session = aiohttp.ClientSession()
-        log_good("HTTP session ready")
-
-        # encryption
         self.fernet = get_fernet()
-        log_good("Encryption loaded")
 
-        # load cogs
         await self.load_cogs()
 
-        log_good(f"Cogs loaded in {time.time() - start:.2f}s")
+        logger.info(f"Cogs loaded in {time.time() - start:.2f}s")
 
-        # sync commands
         try:
-            log_info("Syncing slash commands...")
             await self.tree.sync()
-            log_good("Slash commands synced")
+            logger.info("Slash commands synced")
         except Exception as e:
-            log_bad(f"Command sync failed: {e}")
+            logger.error(f"Command sync failed: {e}")
 
     # =========================
     # COG LOADER
@@ -96,31 +99,38 @@ class LanguageNutBot(commands.Bot):
         for cog in cogs:
             try:
                 await self.load_extension(cog)
-                log_good(f"Loaded {cog}")
+                logger.info(f"Loaded cog: {cog}")
             except Exception as e:
-                log_bad(f"Failed {cog}: {e}")
+                logger.error(f"Failed to load {cog}: {e}")
 
     # =========================
     # READY EVENT
     # =========================
     async def on_ready(self):
-        log_good(f"Logged in as {self.user}")
-        log_info("Bot is ONLINE 🟢")
+        logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
+        logger.info("Bot is fully online 🚀")
+
+    # =========================
+    # CLEAN SHUTDOWN
+    # =========================
+    async def close(self):
+        logger.info("Shutting down bot...")
+
+        if self.aiohttp_session:
+            await self.aiohttp_session.close()
+
+        await super().close()
 
 
 # =========================
-# CLEAN EXIT
+# RUN BOT
 # =========================
 async def main():
     bot = LanguageNutBot()
 
     async with bot:
-        log_info("Starting Discord connection...")
         await bot.start(TOKEN)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        log_warn("Bot shutdown manually")
+    asyncio.run(main())
