@@ -1,37 +1,45 @@
+# utils/logger.py
+"""
+Logging configuration for lnut-bot.
+"""
+
 import logging
-from colorama import init, Fore, Style
+import sys
+from pathlib import Path
 
-init(autoreset=True)
-
-
-class ColorFormatter(logging.Formatter):
-    COLORS = {
-        "INFO": Fore.CYAN,
-        "WARNING": Fore.YELLOW,
-        "ERROR": Fore.RED,
-        "DEBUG": Fore.MAGENTA,
-    }
-
-    def format(self, record):
-        color = self.COLORS.get(record.levelname, Fore.WHITE)
-        msg = super().format(record)
-        return f"{color}{msg}{Style.RESET_ALL}"
+BASE_DIR = Path("/storage/emulated/0/Documents/In_bot/lnut-bot")
+LOG_DIR = BASE_DIR / "logs"
 
 
-def setup_logging():
-    logger = logging.getLogger("lnut_bot")
-    logger.setLevel(logging.INFO)
+def setup_logging(level: int = logging.INFO) -> None:
+    """Configure logging with both console and file handlers."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    handler = logging.StreamHandler()
+    log_path = LOG_DIR / "lnut_bot.log"
 
-    formatter = ColorFormatter(
-        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        datefmt="%H:%M:%S",
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    handler.setFormatter(formatter)
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
 
-    if not logger.handlers:
-        logger.addHandler(handler)
+    # File handler
+    file_handler = logging.FileHandler(
+        log_path, encoding="utf-8", mode="a"
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
 
-    return logger
+    # Root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+
+    logging.getLogger("lnut_bot").info(
+        f"Logging initialized. Log file: {log_path}"
+    )

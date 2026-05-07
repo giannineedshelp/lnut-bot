@@ -1,549 +1,345 @@
+# commands/core.py
+"""
+Core Discord slash commands for LanguageNut bot.
+"""
+
 import asyncio
 import logging
+import time
 from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-import config
-from automation.api_direct import LNApiClient
-from automation.discover import HomeworkDiscoverer
-from automation.stealth import StealthManager
-from utils.encryption import decrypt_value, encrypt_value
+from automation.api_direct import LanguageNutAPI
+from automation.task_handler import TaskHandler
+from config import (
+    get_account,
+    get_decrypted_password,
+    get_user_settings,
+    remove_account,
+    set_account,
+)
+from utils.encryption import encrypt_password
 
-logger = logging.getLogger("lnut_bot.core")
-
-
-# =========================
-# ADMIN CHECK
-# =========================
-
-def is_admin():
-    async def predicate(interaction: discord.Interaction):
-        return interaction.user.guild_permissions.administrator
-
-    return app_commands.check(predicate)
+logger = logging.getLogger("lnut_bot.commands.core")
 
 
 # =========================
-# CORE
+# HELPER: Get API Client
+# =========================
+
+async def _get_api_client(interaction: discord.Interaction) -> Optional[LanguageNutAPI]:
+    """
+    Factory method to create an authenticated API client for the user.
+    Returns None if user isn't logged in or login fails.
+    """
+    bot = interaction.client
+    user_id = str(interaction.user.id)
+
+    account = get_account(user_id)
+    if not account:
+        await interaction.followup.send(
+            "❌ You're not logged in. Use `/login` first.",
+            ephemeral=True,
+        )
+        return None
+
+    password = get_decrypted_password(user_id)
+    if not password:
+        await interaction.followup.send(
+            "❌ Could not decrypt your password. Use `/login` again.",
+            ephemeral=True,
+        )
+        return None
+
+    session = getattr(bot, "aiohttp_session", None)
+    if not session:
+        await interaction.followup.send(
+            "❌ Bot session not available.",
+            ephemeral=True,
+        )
+        return None
+
+    api = LanguageNutAPI(session)
+    success = await api.login(account["username"], password)
+
+    if not success:
+        await interaction.followup.send(
+            "❌ Login failed. Check your credentials with `/login`.",
+            ephemeral=True,
+        )
+        return None
+
+    return api
+
+
+# =========================
+# PROGRESS EMBED BUILDER
+# =========================
+
+def build_progress_embed(
+    current: int,
+    total: int,
+    task_name: str,
+    score: Optional[int] = None,
+    status: str = "in_progress",
+) -> discord.Embed:
+    """Build a live-updating progress embed."""
+    if total == 0:
+        progress = 1.0
+    else:
+        progress = current / total
+
+    bar_length = 20
+    filled = round(progress * bar_length)
+    bar = "█" * filled + "░" * (bar_length - filled)
+
+    embed = discord.Embed(
+        title="📋 Completing Homework",
+        color=discord.Color.blue(),
+    )
+
+    embed.add_field(
+        name="Progress",
+        value=f"`{bar}` **{current}/{total}** ({round(progress * 100)}%)",
+        inline=False,
+    )
+
+    if status == "fetching":
+        embed.add_field(
+            name="⏳ Current Task",
+            value=f"Fetching data for: **{task_name}**",
+            inline=False,
+        )
+    elif status == "done":
+        embed.add_field(
+            name="✅ Completed",
+            value=f"**{task_name}** — Score: **{score}**",
+            inline=False,
+        )
+    elif status == "failed":
+        embed.add_field(
+            name="❌ Failed",
+            value=f"**{task_name}** — Error occurred",
+            inline=False,
+        )
+
+    embed.set_footer(text="This message updates live")
+
+    return embed
+
+
+def build_summary_embed(
+    results: list,
+    total_time: float,
+    settings_used: dict,
+) -> discord.Embed:
+    """Build a final summary embed after all tasks complete."""
+    success_count = sum(1 for r in results if r.get("success"))
+    fail_count = sum(1 for r in results if not r.get("success"))
+    total_score = sum(r.get("score", 0) for r in results)
+
+    embed = discord.Embed(
+        title="✅ Homework Complete!",
+        color=discord.Color.green() if fail_count == 0 else discord.Color.orange(),
+    )
+
+    embed.add_field(
+        name="Summary",
+        value=(
+            f"**Completed:** {success_count}/{len(results)} tasks\n"
+            f"**Total Score:** {total_score}\n"
+            f"**Time:** {total_time:.1f}s\n"
+            f"**Failed:** {fail_count}"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="⚙️ Settings Used",
+        value=(
+            f"Speed: {settings_used.get('speed_min_ms', 'N/A')} - "
+            f"{settings_used.get('speed_max_ms', 'N/A')} ms\n"
+            f"Accuracy: {settings_used.get('accuracy_min', 100)} - "
+            f"{settings_used.get('accuracy_max', 100)}%"
+        ),
+        inline=False,
+    )
+
+    # Add per-task breakdown
+    if results:
+        breakdown = []
+        for r in results:
+            task_name = r.get("task", {}).get("name", "Unknown")
+            status = "✅" if r.get("success") else "❌"
+            score = r.get("score", 0)
+            breakdown.append(f"{status} **{task_name}**: {score} pts")
+
+        embed.add_field(
+            name="📋 Task Breakdown",
+            value="\n".join(breakdown[:10]),
+            inline=False,
+        )
+
+    return embed
+
+
+# =========================
+# COG
 # =========================
 
 class CoreCommands(commands.Cog):
+    """Core commands for LanguageNut bot."""
 
-    def __init__(self, bot):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._login_cooldowns = {}
 
     # =========================
-    # API CLIENT
+    # AUTCOMPLETE for task names
     # =========================
 
-    async def _get_api_client(self, guild_id: int) -> Optional[LNApiClient]:
+    @app_commands.autocompleter
+    async def _task_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        """Autocomplete for homework task names."""
+        user_id = str(interaction.user.id)
+        account = get_account(user_id)
+        if not account:
+            return []
+
+        password = get_decrypted_password(user_id)
+        if not password:
+            return []
+
+        session = getattr(self.bot, "aiohttp_session", None)
+        if not session:
+            return []
+
+        api = LanguageNutAPI(session)
+        success = await api.login(account["username"], password)
+        if not success:
+            return []
+
         try:
-            account = config.get_account(guild_id)
+            await api.get_homeworks()
+            tasks = _extract_pending_tasks(api.homeworks)
+        except Exception:
+            return []
 
-            if not account:
-                return None
+        choices = []
+        for task in tasks:
+            name = task.get("name", "Unnamed")
+            uid = task.get("uid", "")
+            label = f"{name} ({uid[:8]}...)" if uid else name
 
-            settings = config.get_guild_settings(guild_id)
-
-            stealth = StealthManager(
-                speed=settings.get("speed", 1),
-                min_accuracy=settings.get("min_accuracy", 80),
-                max_accuracy=settings.get("max_accuracy", 100),
-            )
-
-            client = LNApiClient(
-                self.bot.aiohttp_session,
-                stealth
-            )
-
-            fernet = self.bot.fernet
-
-            username = decrypt_value(
-                fernet,
-                account.get("username", "")
-            )
-
-            password = decrypt_value(
-                fernet,
-                account.get("password", "")
-            )
-
-            token = account.get("token", "")
-
-            # =========================
-            # EXISTING TOKEN
-            # =========================
-
-            if token:
-                client.token = token
-
-                try:
-                    test = await client.call_lnut(
-                        "assignmentController/getViewableAll",
-                        {"token": token},
-                    )
-
-                    if not test.get("error"):
-                        return client
-
-                except Exception:
-                    pass
-
-            # =========================
-            # RELOGIN
-            # =========================
-
-            new_token = await client.login(username, password)
-
-            if new_token:
-                config.set_account(
-                    guild_id,
-                    account["username"],
-                    account["password"],
-                    new_token,
+            if current.lower() in label.lower():
+                choices.append(
+                    app_commands.Choice(name=label[:100], value=uid)
                 )
 
-                client.token = new_token
-                return client
+            if len(choices) >= 25:
+                break
 
-            return None
-
-        except Exception as e:
-            logger.exception(f"API CLIENT ERROR: {e}")
-            return None
+        return choices
 
     # =========================
-    # LOGIN
+    # COMMANDS
     # =========================
 
     @app_commands.command(
         name="login",
-        description="Login to LanguageNut"
+        description="Log into LanguageNut and store your credentials",
     )
-    async def login(
+    async def cmd_login(
         self,
         interaction: discord.Interaction,
         username: str,
-        password: str
+        password: str,
     ):
-        await interaction.response.defer(
-            thinking=True,
-            ephemeral=True
+        """Store encrypted credentials and verify login."""
+        await interaction.response.defer(ephemeral=True)
+
+        # Verify credentials by attempting login
+        session = getattr(self.bot, "aiohttp_session", None)
+        if not session:
+            await interaction.followup.send(
+                "❌ Bot session not available.",
+                ephemeral=True,
+            )
+            return
+
+        api = LanguageNutAPI(session)
+        success = await api.login(username, password)
+
+        if not success:
+            await interaction.followup.send(
+                "❌ Login failed. Check your username and password.",
+                ephemeral=True,
+            )
+            return
+
+        # Encrypt and store
+        encrypted = encrypt_password(password)
+        set_account(
+            user_id=str(interaction.user.id),
+            username=username,
+            password_encrypted=encrypted,
         )
 
-        try:
-            settings = config.get_guild_settings(
-                interaction.guild_id
-            )
-
-            stealth = StealthManager(
-                speed=settings.get("speed", 1)
-            )
-
-            client = LNApiClient(
-                self.bot.aiohttp_session,
-                stealth
-            )
-
-            token = await client.login(username, password)
-
-            if not token:
-                await interaction.followup.send(
-                    "❌ Login failed",
-                    ephemeral=True
-                )
-                return
-
-            fernet = self.bot.fernet
-
-            config.set_account(
-                interaction.guild_id,
-                encrypt_value(fernet, username),
-                encrypt_value(fernet, password),
-                token,
-            )
-
-            await interaction.followup.send(
-                "✅ Logged in successfully",
-                ephemeral=True
-            )
-
-        except Exception as e:
-            logger.exception(e)
-
-            await interaction.followup.send(
-                f"❌ Error: {e}",
-                ephemeral=True
-            )
-
-    # =========================
-    # LOGOUT
-    # =========================
+        await interaction.followup.send(
+            "✅ Login successful! Credentials stored securely.",
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="logout",
-        description="Logout account"
+        description="Remove your stored LanguageNut credentials",
     )
-    async def logout(self, interaction: discord.Interaction):
-        await interaction.response.defer(
-            thinking=True,
-            ephemeral=True
-        )
+    async def cmd_logout(self, interaction: discord.Interaction):
+        """Remove stored credentials."""
+        await interaction.response.defer(ephemeral=True)
 
-        try:
-            if config.remove_account(interaction.guild_id):
-                await interaction.followup.send(
-                    "✅ Logged out",
-                    ephemeral=True
-                )
-            else:
-                await interaction.followup.send(
-                    "❌ No saved account",
-                    ephemeral=True
-                )
-
-        except Exception as e:
-            logger.exception(e)
-
+        removed = remove_account(str(interaction.user.id))
+        if removed:
             await interaction.followup.send(
-                f"❌ Error: {e}",
-                ephemeral=True
+                "✅ Logged out and credentials removed.",
+                ephemeral=True,
             )
-
-    # =========================
-    # HOMEWORK
-    # =========================
+        else:
+            await interaction.followup.send(
+                "❌ No credentials found.",
+                ephemeral=True,
+            )
 
     @app_commands.command(
         name="homework",
-        description="View homework list"
+        description="List your pending LanguageNut homework",
     )
-    async def homework(self, interaction: discord.Interaction):
-        await interaction.response.defer(
-            thinking=True
-        )
+    async def cmd_homework(self, interaction: discord.Interaction):
+        """Fetch and display pending homework."""
+        await interaction.response.defer(ephemeral=True)
+
+        api = await _get_api_client(interaction)
+        if not api:
+            return
 
         try:
-            client = await self._get_api_client(
-                interaction.guild_id
-            )
+            homeworks = await api.get_homeworks()
+            tasks = _extract_pending_tasks(homeworks)
 
-            if not client:
+            if not tasks:
                 await interaction.followup.send(
-                    "❌ Not logged in"
-                )
-                return
-
-            discoverer = HomeworkDiscoverer(client)
-
-            homeworks = await discoverer.get_all_homeworks(
-                client.token
-            )
-
-            if not homeworks:
-                await interaction.followup.send(
-                    "❌ No homework found"
+                    "🎉 No pending homework!",
+                    ephemeral=True,
                 )
                 return
 
             embed = discord.Embed(
-                title="📚 Homework Dashboard",
-                color=discord.Color.blurple()
-            )
-
-            for i, hw in enumerate(homeworks[:15]):
-
-                hw_id = hw.get("id", "?")
-                name = hw.get("name", "Unnamed")
-
-                tasks = hw.get("tasks", [])
-
-                done = sum(
-                    1 for t in tasks
-                    if t.get("gameResults")
-                )
-
-                total = len(tasks)
-
-                percent = (
-                    int((done / total) * 100)
-                    if total > 0 else 0
-                )
-
-                embed.add_field(
-                    name=f"{i+1}. {name}",
-                    value=(
-                        f"🆔 `{hw_id}`\n"
-                        f"📊 {done}/{total} ({percent}%)\n"
-                        f"📝 Tasks: {total}"
-                    ),
-                    inline=False
-                )
-
-            await interaction.followup.send(
-                embed=embed
-            )
-
-        except Exception as e:
-            logger.exception(e)
-
-            await interaction.followup.send(
-                f"❌ Error: {e}"
-            )
-
-    # =========================
-    # DO
-    # =========================
-
-    @app_commands.command(
-        name="do",
-        description="Run task using hw_id:task_index"
-    )
-    async def do(
-        self,
-        interaction: discord.Interaction,
-        task: str
-    ):
-        await interaction.response.defer(
-            thinking=True
-        )
-
-        try:
-            hw_id_str, task_idx_str = task.split(":")
-
-            hw_id = int(hw_id_str)
-            task_idx = int(task_idx_str)
-
-        except:
-            await interaction.followup.send(
-                "❌ Format: hw_id:task_index"
-            )
-            return
-
-        try:
-            client = await self._get_api_client(
-                interaction.guild_id
-            )
-
-            if not client:
-                await interaction.followup.send(
-                    "❌ Not logged in"
-                )
-                return
-
-            discoverer = HomeworkDiscoverer(client)
-
-            homeworks = await discoverer.get_all_homeworks(
-                client.token
-            )
-
-            target = next(
-                (
-                    h for h in homeworks
-                    if h.get("id") == hw_id
-                ),
-                None
-            )
-
-            if not target:
-                await interaction.followup.send(
-                    "❌ Homework not found"
-                )
-                return
-
-            tasks = target.get("tasks", [])
-
-            if (
-                task_idx < 0
-                or task_idx >= len(tasks)
-            ):
-                await interaction.followup.send(
-                    "❌ Invalid task index"
-                )
-                return
-
-            task_obj = tasks[task_idx]
-
-            name = task_obj.get(
-                "translation",
-                "Unknown Task"
-            )
-
-            progress = discord.Embed(
-                title="⚙️ Running Task",
-                description=f"Currently doing:\n`{name}`",
-                color=discord.Color.orange()
-            )
-
-            msg = await interaction.followup.send(
-                embed=progress
-            )
-
-            # =========================
-            # PLACE REAL TASK LOGIC HERE
-            # =========================
-
-            await asyncio.sleep(2)
-
-            done = discord.Embed(
-                title="✅ Task Complete",
-                description=f"Finished:\n`{name}`",
-                color=discord.Color.green()
-            )
-
-            await msg.edit(embed=done)
-
-        except Exception as e:
-            logger.exception(e)
-
-            await interaction.followup.send(
-                f"❌ Error: {e}"
-            )
-
-    # =========================
-    # DO ALT
-    # =========================
-
-    @app_commands.command(
-        name="doalt",
-        description="Run multiple tasks using ranges"
-    )
-    async def doalt(
-        self,
-        interaction: discord.Interaction,
-        homework_id: int,
-        tasks: str
-    ):
-        await interaction.response.defer(
-            thinking=True
-        )
-
-        try:
-            await interaction.followup.send(
-                (
-                    f"✅ Parsed task selection\n\n"
-                    f"📚 Homework ID: `{homework_id}`\n"
-                    f"📝 Tasks: `{tasks}`"
-                )
-            )
-
-        except Exception as e:
-            logger.exception(e)
-
-            await interaction.followup.send(
-                f"❌ Error: {e}"
-            )
-
-    # =========================
-    # CLEAR
-    # =========================
-
-    @app_commands.command(
-        name="clear",
-        description="Clear messages"
-    )
-    @is_admin()
-    async def clear(
-        self,
-        interaction: discord.Interaction,
-        amount: int = 10
-    ):
-        await interaction.response.defer(
-            thinking=True,
-            ephemeral=True
-        )
-
-        try:
-            deleted = await interaction.channel.purge(
-                limit=amount
-            )
-
-            await interaction.followup.send(
-                f"✅ Deleted {len(deleted)} messages",
-                ephemeral=True
-            )
-
-        except Exception as e:
-            logger.exception(e)
-
-            await interaction.followup.send(
-                f"❌ Error: {e}",
-                ephemeral=True
-            )
-
-    # =========================
-    # CLEAR ALL
-    # =========================
-
-    @app_commands.command(
-        name="clearall",
-        description="Clear ALL messages in channel"
-    )
-    @is_admin()
-    async def clearall(
-        self,
-        interaction: discord.Interaction
-    ):
-        await interaction.response.defer(
-            thinking=True,
-            ephemeral=True
-        )
-
-        try:
-            deleted = await interaction.channel.purge()
-
-            await interaction.followup.send(
-                f"✅ Deleted {len(deleted)} messages",
-                ephemeral=True
-            )
-
-        except Exception as e:
-            logger.exception(e)
-
-            await interaction.followup.send(
-                f"❌ Error: {e}",
-                ephemeral=True
-            )
-
-    # =========================
-    # PING
-    # =========================
-
-    @app_commands.command(
-        name="ping",
-        description="Bot latency"
-    )
-    async def ping(self, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            f"🏓 {round(self.bot.latency * 1000)}ms"
-        )
-
-    # =========================
-    # RESTART
-    # =========================
-
-    @app_commands.command(
-        name="restart",
-        description="Restart bot"
-    )
-    @is_admin()
-    async def restart(
-        self,
-        interaction: discord.Interaction
-    ):
-        await interaction.response.send_message(
-            "♻️ Restart requested"
-        )
-
-        await self.bot.close()
-
-
-# =========================
-# SETUP
-# =========================
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(CoreCommands(bot))
+                title="📚 Pending Homework",
+                color=discord.Color

@@ -1,177 +1,170 @@
 import logging
-from typing import Any
 
 logger = logging.getLogger("lnut_bot.discover")
 
 
 class HomeworkDiscoverer:
     """
-    Handles discovering and resolving homework/task structure from LanguageNut API.
-    Mirrors the logic from lnut-client's client_application class.
+    Discovers and resolves homework/task structure from LanguageNut.
+
+    Mirrors the JS client_application class from lnut-client:
+        - get_hwks()        → get_all_homeworks()
+        - get_task_name()   → get_task_name()
+        - get_hwks() processes assignmentController/getViewableAll
     """
 
-    # Task type detection patterns
-    TASK_PATTERNS = {
-        "sentence": "sentenceCatalog",
-        "verb": "verbUid",
-        "phonic": "phonicCatalogUid",
-        "exam": "examUid",
-    }
-
-    def __init__(self, api_client):
+    def __init__(self, api_client: "LNApiClient"):
         """
         Args:
-            api_client: LNApiClient instance with an active session
+            api_client: An authenticated LNApiClient instance
         """
         self.api = api_client
         self.module_translations = {}
         self.display_translations = {}
+        self.homeworks = []
 
-    async def resolve_task_type(self, task: dict) -> str:
+    async def get_all_homeworks(self) -> list[dict]:
         """
-        Determine the type of task by inspecting its gameLink.
-        
-        Mirrors the JS get_task_type() logic:
-        - sentenceCatalog → "sentence"
-        - verbUid → "verb"  
-        - phonicCatalogUid → "phonic"
-        - examUid → "exam"
-        - fallback → "vocabs"
-        
-        Args:
-            task: Task dictionary from the API
-            
+        Fetch all homeworks for the logged-in user.
+
+        Mirrors JS: assignmentController/getViewableAll with token.
+
+        The API returns:
+            {
+                "homework": [
+                    {
+                        "id": int,
+                        "name": str,
+                        "languageCode": str (ietf like "fr-FR"),
+                        "tasks": [
+                            {
+                                "gameUid": str,
+                                "translation": str,
+                                "gameLink": str,
+                                "type": str,
+                                "catalog_uid": str,
+                                "base": list,
+                                "rel_module_uid": str,
+                                "module_translation": str,
+                                "module_translations": list[str],
+                                "verb_name": str,
+                                "gameResults": {...} or None,
+                                ...
+                            }
+                        ]
+                    }
+                ]
+            }
+
         Returns:
-            str: One of "sentence", "verb", "phonic", "exam", "vocabs"
+            list[dict]: List of homework objects (reversed, newest first)
         """
-        game_link = task.get("gameLink", "")
-        
-        for task_type, pattern in self.TASK_PATTERNS.items():
-            if pattern in game_link:
-                logger.debug(f"Task type resolved: {task_type} (pattern: {pattern})")
-                return task_type
-        
-        logger.debug(f"No pattern matched gameLink '{game_link[:50]}', falling back to 'vocabs'")
-        return "vocabs"
+        data = await self.api.call_lnut("assignmentController/getViewableAll", {
+            "token": self.api.token,
+        })
 
-    async def get_all_homeworks(self, token: str) -> list[dict]:
-        """
-        Fetch all viewable homeworks for the logged-in user.
-        
-        Args:
-            token: LanguageNut auth token
-            
-        Returns:
-            list[dict]: List of homework objects
-        """
-        data = await self.api.call_lnut(
-            "assignmentController/getViewableAll",
-            {"token": token},
-        )
-        homeworks = data.get("homework", [])
-        homeworks.reverse()  # Match JS behavior: newest first
-        logger.info(f"Fetched {len(homeworks)} homeworks")
-        return homeworks
+        self.homeworks = data.get("homework", [])
+        # Reverse so newest is first (matching JS: this.homeworks.reverse())
+        self.homeworks.reverse()
 
-    async def get_tasks_by_ids(self, token: str, homework_id: int, task_ids: list[str]) -> list[dict]:
-        """
-        Get specific tasks by their gameUids for a given homework.
-        
-        Args:
-            token: LanguageNut auth token
-            homework_id: Homework ID
-            task_ids: List of gameUid strings
-            
-        Returns:
-            list[dict]: Full task objects with metadata
-        """
-        # First get all homeworks, find the one we need
-        all_homeworks = await self.get_all_homeworks(token)
-        target_hw = None
-        for hw in all_homeworks:
-            if hw.get("id") == homework_id:
-                target_hw = hw
-                break
-        
-        if not target_hw:
-            logger.warning(f"Homework {homework_id} not found")
-            return []
+        logger.info(f"Fetched {len(self.homeworks)} homeworks")
+        return self.homeworks
 
-        tasks = target_hw.get("tasks", [])
-        matched = [t for t in tasks if t.get("gameUid") in task_ids]
-        logger.info(f"Found {len(matched)}/{len(task_ids)} requested tasks in homework {homework_id}")
-        return matched
-
-    async def get_incomplete_tasks(self, token: str) -> list[tuple[dict, dict]]:
-        """
-        Get all incomplete tasks across all homeworks.
-        
-        Returns:
-            list[tuple[dict, dict]]: List of (homework, task) tuples for incomplete tasks
-        """
-        homeworks = await self.get_all_homeworks(token)
-        incomplete = []
-        
-        for hw in homeworks:
-            tasks = hw.get("tasks", [])
-            for task in tasks:
-                game_results = task.get("gameResults")
-                if not game_results or game_results.get("percentage", 0) == 0:
-                    incomplete.append((hw, task))
-        
-        logger.info(f"Found {len(incomplete)} incomplete tasks across {len(homeworks)} homeworks")
-        return incomplete
-
-    async def get_task_name(self, task: dict, hw: dict | None = None) -> str:
+    async def get_task_name(self, task: dict) -> str:
         """
         Resolve the human-readable name for a task.
-        
-        Mirrors JS get_task_name():
-        - If task has verb_name, use it
-        - If module_translations exists, look up by first entry
-        - If module_translation exists, look it up
-        
+
+        Mirrors JS get_task_name() exactly:
+            1. Try task.verb_name
+            2. Try task.module_translations[0] looked up in module_translations
+            3. Try task.module_translation looked up in module_translations
+
         Args:
-            task: Task dictionary
-            hw: Optional homework dictionary for context
-            
+            task: Task dictionary from homework
+
         Returns:
             str: Human-readable task name
         """
-        name = task.get("verb_name", "Unknown Task")
+        name = task.get("verb_name", "")
 
-        if not self.module_translations:
-            try:
-                await self._load_translations()
-            except Exception as e:
-                logger.warning(f"Could not load module translations: {e}")
-
-        if task.get("module_translations") and self.module_translations:
+        if not name and task.get("module_translations"):
             key = task["module_translations"][0]
-            name = self.module_translations.get(key, name)
+            name = self.module_translations.get(key, "")
 
-        if task.get("module_translation") and self.module_translations:
-            key = task["module_translation"]
-            name = self.module_translations.get(key, name)
+        if not name and task.get("module_translation"):
+            name = self.module_translations.get(task["module_translation"], "")
 
-        # Also try display translations
-        if task.get("translation") and self.display_translations:
-            display = self.display_translations.get(task["translation"])
-            if display:
-                return f"{display} — {name}"
+        return name or "Unknown Task"
 
-        return name
+    async def load_translations(self) -> None:
+        """
+        Pre-fetch display and module translations for task naming.
 
-    async def _load_translations(self):
-        """Load both module and display translations (called lazily)."""
-        data = await self.api.call_lnut(
-            "translationController/getUserModuleTranslations",
-            {"token": self.api.token},
+        Call this once after login to populate translation maps.
+        """
+        self.display_translations = await self.api.get_display_translations()
+        self.module_translations = await self.api.get_module_translations()
+        logger.debug(
+            f"Loaded {len(self.display_translations)} display translations "
+            f"and {len(self.module_translations)} module translations"
         )
-        self.module_translations = data.get("translations", {})
 
-        data2 = await self.api.call_lnut(
-            "publicTranslationController/getTranslations",
-            {},
-        )
-        self.display_translations = data2.get("translations", {})
+    async def complete_task(self, homework_id: int, task_index: int) -> dict:
+        """
+        Complete a single task by fetching its data and submitting scores.
+
+        Args:
+            homework_id: The homework ID
+            task_index:  Index of the task within the homework's task list
+
+        Returns:
+            dict: Response from score submission, or error dict
+        """
+        # Find the homework
+        target = next((h for h in self.homeworks if h.get("id") == homework_id), None)
+        if not target:
+            return {"error": f"Homework {homework_id} not found"}
+
+        tasks = target.get("tasks", [])
+        if task_index < 0 or task_index >= len(tasks):
+            return {"error": f"Task index {task_index} out of range"}
+
+        task = tasks[task_index]
+
+        # Set the language code on the API client
+        self.api.language_code = target.get("languageCode", "")
+
+        # Fetch task data
+        vocabs = await self.api.fetch_task_data(task)
+        if not vocabs:
+            return {"error": "No vocabs fetched for this task"}
+
+        # Submit score
+        result = await self.api.submit_score(task, vocabs, homework_id)
+        return result
+
+    async def complete_all_tasks(self, homework_id: int = None) -> list[dict]:
+        """
+        Complete all tasks across all homeworks, or a specific homework.
+
+        Args:
+            homework_id: Optional — if set, only complete tasks in this homework
+
+        Returns:
+            list[dict]: Results from each completed task
+        """
+        results = []
+
+        for hw in self.homeworks:
+            if homework_id is not None and hw.get("id") != homework_id:
+                continue
+
+            for idx in range(len(hw.get("tasks", []))):
+                result = await self.complete_task(hw["id"], idx)
+                results.append({
+                    "homework_id": hw["id"],
+                    "task_index": idx,
+                    "result": result,
+                })
+
+        return results

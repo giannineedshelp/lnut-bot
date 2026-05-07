@@ -1,3 +1,8 @@
+# main.py
+"""
+LanguageNut Discord Bot — entry point.
+"""
+
 import asyncio
 import logging
 import os
@@ -56,6 +61,7 @@ class LanguageNutBot(commands.Bot):
         super().__init__(
             command_prefix="?",
             intents=intents,
+            owner_id=1453752725324955656,
         )
 
         self.aiohttp_session = None
