@@ -70,9 +70,6 @@ class CoreCommands(commands.Cog):
 
         return None
 
-    # =========================
-    # LOGIN
-    # =========================
     @app_commands.command(
         name="login",
         description="Log in to LanguageNut and securely store credentials",
@@ -87,7 +84,7 @@ class CoreCommands(commands.Cog):
         username: str,
         password: str,
     ):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         settings = config.get_guild_settings(interaction.guild_id)
         stealth = StealthManager(speed=settings["speed"])
@@ -98,7 +95,7 @@ class CoreCommands(commands.Cog):
 
         if not token:
             await interaction.followup.send(
-                "❌ Login failed. Check your username and password.",
+                "Login failed. Check your username and password.",
                 ephemeral=True,
             )
             return
@@ -117,47 +114,42 @@ class CoreCommands(commands.Cog):
         logger.info(f"User logged in for guild {interaction.guild_id}")
 
         await interaction.followup.send(
-            "✅ Login successful! Credentials stored securely.\n"
+            "Login successful. Credentials stored securely.\n"
             "Use `/homework` to view assignments.",
             ephemeral=True,
         )
 
-    # =========================
-    # LOGOUT
-    # =========================
     @app_commands.command(
         name="logout",
         description="Remove stored LanguageNut credentials",
     )
     async def logout(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         if config.remove_account(interaction.guild_id):
             await interaction.followup.send(
-                "✅ Logged out successfully.",
+                "Logged out successfully.",
                 ephemeral=True,
             )
         else:
             await interaction.followup.send(
-                "❌ No credentials stored.",
+                "No credentials stored.",
                 ephemeral=True,
             )
 
-    # =========================
-    # HOMEWORK
-    # =========================
     @app_commands.command(
         name="homework",
         description="List all homework assignments",
     )
     async def homework(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         client = await self._get_api_client(interaction.guild_id)
 
         if not client:
             await interaction.followup.send(
-                "❌ Not logged in. Use `/login` first."
+                "Not logged in. Use `/login` first.",
+                ephemeral=True,
             )
             return
 
@@ -168,16 +160,17 @@ class CoreCommands(commands.Cog):
         except Exception as e:
             logger.exception("Homework fetch failed")
             await interaction.followup.send(
-                f"❌ Error fetching homework: {e}"
+                f"Error fetching homework: {e}",
+                ephemeral=True,
             )
             return
 
         if not homeworks:
-            await interaction.followup.send("📭 No homework found.")
+            await interaction.followup.send("No homework found.", ephemeral=True)
             return
 
         embed = discord.Embed(
-            title="📚 Your LanguageNut Homeworks",
+            title="Your LanguageNut Homeworks",
             color=discord.Color.blue(),
         )
 
@@ -191,30 +184,18 @@ class CoreCommands(commands.Cog):
             )
 
             total = len(tasks)
-
             lines = []
 
             for i, task in enumerate(tasks[:8]):
                 pct = "-"
                 if task.get("gameResults"):
-                    pct = task["gameResults"].get(
-                        "percentage",
-                        "-"
-                    )
+                    pct = task["gameResults"].get("percentage", "-")
 
-                task_name = task.get(
-                    "translation",
-                    "Unknown"
-                )
-
-                lines.append(
-                    f"`[{i}]` {task_name} — **{pct}%**"
-                )
+                task_name = task.get("translation", "Unknown")
+                lines.append(f"`[{i}]` {task_name} - **{pct}%**")
 
             if len(tasks) > 8:
-                lines.append(
-                    f"*...and {len(tasks)-8} more tasks*"
-                )
+                lines.append(f"*...and {len(tasks)-8} more tasks*")
 
             embed.add_field(
                 name=f"{name} (ID: {hw_id})",
@@ -225,19 +206,14 @@ class CoreCommands(commands.Cog):
                 inline=False,
             )
 
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # =========================
-    # TASK AUTOCOMPLETE
-    # =========================
     async def _task_autocomplete(
         self,
         interaction: discord.Interaction,
         current: str,
     ):
-        client = await self._get_api_client(
-            interaction.guild_id
-        )
+        client = await self._get_api_client(interaction.guild_id)
 
         if not client:
             return []
@@ -245,9 +221,7 @@ class CoreCommands(commands.Cog):
         discoverer = HomeworkDiscoverer(client)
 
         try:
-            homeworks = await discoverer.get_all_homeworks(
-                client.token
-            )
+            homeworks = await discoverer.get_all_homeworks(client.token)
         except Exception:
             return []
 
@@ -258,23 +232,13 @@ class CoreCommands(commands.Cog):
             hw_name = hw.get("name", "Unnamed")
 
             for i, task in enumerate(hw.get("tasks", [])):
-                task_name = task.get(
-                    "translation",
-                    "Unknown"
-                )
+                task_name = task.get("translation", "Unknown")
 
                 pct = 0
                 if task.get("gameResults"):
-                    pct = task["gameResults"].get(
-                        "percentage",
-                        0
-                    )
+                    pct = task["gameResults"].get("percentage", 0)
 
-                label = (
-                    f"[{hw_id}:{i}] "
-                    f"{hw_name} — "
-                    f"{task_name} ({pct}%)"
-                )
+                label = f"[{hw_id}:{i}] {hw_name} - {task_name} ({pct}%)"
 
                 if current.lower() in label.lower():
                     choices.append(
@@ -292,25 +256,18 @@ class CoreCommands(commands.Cog):
 
         return choices
 
-    # =========================
-    # DO TASK
-    # =========================
     @app_commands.command(
         name="do",
         description="Complete a specific task",
     )
-    @app_commands.describe(
-        task="Task to complete"
-    )
-    @app_commands.autocomplete(
-        task=_task_autocomplete
-    )
+    @app_commands.describe(task="Task to complete")
+    @app_commands.autocomplete(task=_task_autocomplete)
     async def do_task(
         self,
         interaction: discord.Interaction,
         task: str,
     ):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         try:
             hw_id, task_idx = task.split(":")
@@ -318,30 +275,23 @@ class CoreCommands(commands.Cog):
             task_idx = int(task_idx)
 
         except (ValueError, IndexError):
-            await interaction.followup.send(
-                "❌ Invalid task format."
-            )
+            await interaction.followup.send("Invalid task format.", ephemeral=True)
             return
 
-        client = await self._get_api_client(
-            interaction.guild_id
-        )
+        client = await self._get_api_client(interaction.guild_id)
 
         if not client:
-            await interaction.followup.send(
-                "❌ Not logged in."
-            )
+            await interaction.followup.send("Not logged in.", ephemeral=True)
             return
 
         discoverer = HomeworkDiscoverer(client)
 
         try:
-            homeworks = await discoverer.get_all_homeworks(
-                client.token
-            )
+            homeworks = await discoverer.get_all_homeworks(client.token)
         except Exception as e:
             await interaction.followup.send(
-                f"❌ Error fetching homework: {e}"
+                f"Error fetching homework: {e}",
+                ephemeral=True,
             )
             return
 
@@ -354,7 +304,8 @@ class CoreCommands(commands.Cog):
 
         if not target_hw:
             await interaction.followup.send(
-                f"❌ Homework `{hw_id}` not found."
+                f"Homework `{hw_id}` not found.",
+                ephemeral=True,
             )
             return
 
@@ -362,64 +313,43 @@ class CoreCommands(commands.Cog):
 
         if task_idx < 0 or task_idx >= len(tasks):
             await interaction.followup.send(
-                f"❌ Task index `{task_idx}` invalid."
+                f"Task index `{task_idx}` invalid.",
+                ephemeral=True,
             )
             return
 
         task_obj = tasks[task_idx]
-        task_name = task_obj.get(
-            "translation",
-            "Unknown"
-        )
+        task_name = task_obj.get("translation", "Unknown")
+        game_link = task_obj.get("gameLink", "")
 
-        game_link = task_obj.get(
-            "gameLink",
-            ""
+        msg = await interaction.followup.send(
+            f"Working on **{task_name}**...",
+            ephemeral=True,
+            wait=True,
         )
-
-        await interaction.followup.send(
-            f"⏳ Working on **{task_name}**..."
-        )
-
-        msg = await interaction.original_response()
 
         try:
-            task_data = await client.fetch_task_data(
-                task_obj,
-                game_link,
-            )
+            task_data = await client.fetch_task_data(task_obj, game_link)
 
             if not task_data:
+                await msg.edit(content=f"No data found for **{task_name}**.")
+                return
+
+            result = await client.submit_score(task_obj, task_data)
+            if result.get("error"):
                 await msg.edit(
                     content=(
-                        f"⚠️ No data found for "
-                        f"**{task_name}**."
+                        f"Failed to submit **{task_name}**: "
+                        f"{result.get('body', result)}"
                     )
                 )
                 return
 
-            # Placeholder automation logic
-            await asyncio.sleep(2)
-
-            await msg.edit(
-                content=(
-                    f"✅ Successfully completed "
-                    f"**{task_name}**."
-                )
-            )
+            await msg.edit(content=f"Successfully completed **{task_name}**.")
 
         except Exception as e:
-            logger.exception(
-                "Task automation failed"
-            )
-
-            await msg.edit(
-                content=(
-                    f"❌ Failed to complete "
-                    f"**{task_name}**: {e}"
-                )
-            )
-
+            logger.exception("Task automation failed")
+            await msg.edit(content=f"Failed to complete **{task_name}**: {e}")
             return
 
 
