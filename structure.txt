@@ -1,20 +1,55 @@
-/storage/emulated/0/Documents/In_bot/lnut-bot/
-├── main.py
-├── .env
-├── .gitignore
-├── requirements.txt
-├── README.md
-├── scripts/
-│   └── push.sh
-├── data/
-│   ├── accounts.json
-│   └── settings.json
-├── utils/
-│   ├── encryption.py
-│   └── logger.py
-├── automation/
-│   ├── api_direct.py
-│   └── task_handler.py
-└── commands/
-    ├── core.py
-    └── settings.py
+C:\Users\Saturated\Documents\In_bot
+|-- main.py
+|-- config.py
+|-- requirements.txt
+|-- structure.txt
+|-- README.md
+|-- CHANGELOG.md
+|-- accounts.json
+|-- data
+|   |-- config.json
+|   `-- settings.json
+|-- automation
+|   |-- __init__.py
+|   |-- api_direct.py
+|   |-- discover.py
+|   |-- runner.py
+|   |-- stealth.py
+|   `-- task_handler.py
+|-- commands
+|   |-- __init__.py
+|   |-- commands_profiles.py
+|   |-- commands_settings.py
+|   `-- core.py
+|-- utils
+|   |-- __init__.py
+|   |-- encryption.py
+|   |-- helper.py
+|   |-- language_nut_api.py
+|   |-- logger.py
+|   `-- task_handler.py
+|-- scripts
+|   |-- push.bash
+|   `-- setup_ln_bot.cmd
+`-- In_bot
+    |-- main.py
+    |-- config.py
+    |-- requirements .txt
+    |-- structure (1).txt
+    |-- setup_ln_bot.cmd
+    |-- automation
+    |   |-- __init__.py
+    |   |-- api_direct.py
+    |   |-- discover.py
+    |   `-- stealth.py
+    |-- commands
+    |   |-- __init__.py
+    |   |-- commands_profiles.py
+    |   |-- commands_settings.py
+    |   |-- core.py
+    |   `-- settings.py
+    `-- utils
+        |-- __init__.py
+        |-- encryption.py
+        |-- helper.py
+        `-- logger.py
