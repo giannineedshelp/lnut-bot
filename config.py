@@ -1,87 +1,87 @@
 import json
-import os
 from pathlib import Path
+import os
 
-CONFIG_PATH = Path("config.json")
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "data"
+ACCOUNTS_FILE = DATA_DIR / "accounts.json"
+SETTINGS_FILE = DATA_DIR / "settings.json"
+
+DATA_DIR.mkdir(exist_ok=True)
 
 
-def load_config() -> dict:
-    """Load the config file, creating it if it doesn't exist."""
-    if not CONFIG_PATH.exists():
-        default = {"accounts": {}}
-        save_config(default)
-        return default
+# DO NOT load dotenv here anymore
+# DO NOT import encryption here
+
+# =========================
+# ACCOUNTS
+# =========================
+
+def _load(file):
+    if not file.exists():
+        return {}
     try:
-        with open(CONFIG_PATH, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        default = {"accounts": {}}
-        save_config(default)
-        return default
+        return json.loads(file.read_text())
+    except Exception:
+        return {}
+
+def _save(file, data):
+    file.write_text(json.dumps(data, indent=2))
 
 
-def save_config(config: dict) -> None:
-    """Save config to disk."""
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=2)
-
-
-def get_account(guild_id: int) -> dict | None:
-    """Get account config for a guild, or None."""
-    config = load_config()
-    return config.get("accounts", {}).get(str(guild_id))
-
-
-def set_account(guild_id: int, username: str, password: str, token: str = "") -> dict:
-    """Set account credentials for a guild."""
-    config = load_config()
-    if "accounts" not in config:
-        config["accounts"] = {}
-    config["accounts"][str(guild_id)] = {
+def set_account(user_id, username, password_encrypted):
+    data = _load(ACCOUNTS_FILE)
+    data[user_id] = {
         "username": username,
-        "password": password,
-        "token": token,
+        "password_encrypted": password_encrypted
     }
-    save_config(config)
-    return config["accounts"][str(guild_id)]
+    _save(ACCOUNTS_FILE, data)
 
 
-def remove_account(guild_id: int) -> bool:
-    """Remove account for a guild. Returns True if existed."""
-    config = load_config()
-    if str(guild_id) in config.get("accounts", {}):
-        del config["accounts"][str(guild_id)]
-        save_config(config)
+def get_account(user_id):
+    return _load(ACCOUNTS_FILE).get(user_id)
+
+
+def remove_account(user_id):
+    data = _load(ACCOUNTS_FILE)
+    if user_id in data:
+        del data[user_id]
+        _save(ACCOUNTS_FILE, data)
         return True
     return False
 
 
-def get_all_accounts() -> dict:
-    """Get all stored accounts."""
-    config = load_config()
-    return config.get("accounts", {})
+# =========================
+# PASSWORD (IMPORTANT FIX)
+# =========================
+
+def get_decrypted_password(user_id):
+    from utils.encryption import decrypt_password  # moved INSIDE function
+
+    acc = get_account(user_id)
+    if not acc:
+        return None
+
+    try:
+        return decrypt_password(acc["password_encrypted"])
+    except:
+        return None
 
 
-def get_guild_settings(guild_id: int) -> dict:
-    """Get per-guild automation settings with defaults."""
-    config = load_config()
-    defaults = {
-        "speed": 10.0,
-        "min_accuracy": 85,
-        "max_accuracy": 92,
-        "stealth_enabled": True,
-        "concurrency": 3,
+# =========================
+# SETTINGS
+# =========================
+
+def get_user_settings(user_id):
+    data = _load(SETTINGS_FILE).get(user_id, {})
+    return {
+        "speed": data.get("speed", 10000),
+        "accuracy_min": data.get("accuracy_min", 100),
+        "accuracy_max": data.get("accuracy_max", 100),
     }
-    guild_settings = config.get("guild_settings", {}).get(str(guild_id), {})
-    return {**defaults, **guild_settings}
 
 
-def set_guild_setting(guild_id: int, key: str, value) -> None:
-    """Update a single guild setting."""
-    config = load_config()
-    if "guild_settings" not in config:
-        config["guild_settings"] = {}
-    if str(guild_id) not in config["guild_settings"]:
-        config["guild_settings"][str(guild_id)] = {}
-    config["guild_settings"][str(guild_id)][key] = value
-    save_config(config)
+def save_user_settings(user_id, settings):
+    data = _load(SETTINGS_FILE)
+    data[user_id] = settings
+    _save(SETTINGS_FILE, data)

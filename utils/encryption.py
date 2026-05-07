@@ -18,17 +18,14 @@ def get_fernet() -> Fernet | None:
 
     key_str = os.getenv("ENCRYPTION_KEY", "").strip()
     if not key_str:
-        logger.warning("No ENCRYPTION_KEY set — credentials will be stored in plaintext!")
+        logger.warning("No ENCRYPTION_KEY set - credentials stored in plaintext!")
         return None
 
     try:
-        # Support both raw base64 keys and passphrase-based keys
         if len(key_str) == 44 and key_str.endswith("="):
-            # Looks like a raw Fernet key
             key = key_str.encode() if isinstance(key_str, str) else key_str
         else:
-            # Derive a key from the passphrase
-            salt = b"lnut_bot_salt_fixed"  # Fixed salt for deterministic key
+            salt = b"lnut_bot_salt_fixed"
             kdf = PBKDF2HMAC(
                 algorithm=hashes.SHA256(),
                 length=32,
@@ -46,7 +43,6 @@ def get_fernet() -> Fernet | None:
 
 
 def encrypt_value(fernet: Fernet | None, value: str) -> str:
-    """Encrypt a string value. Returns plaintext if fernet is None."""
     if not fernet or not value:
         return value
     try:
@@ -57,7 +53,6 @@ def encrypt_value(fernet: Fernet | None, value: str) -> str:
 
 
 def decrypt_value(fernet: Fernet | None, value: str) -> str:
-    """Decrypt a string value. Returns as-is if fernet is None."""
     if not fernet or not value:
         return value
     try:
@@ -65,3 +60,17 @@ def decrypt_value(fernet: Fernet | None, value: str) -> str:
     except Exception as e:
         logger.error(f"Decryption failed: {e}")
         return value
+
+
+# === Aliases for core.py compatibility ===
+
+def encrypt_password(password: str) -> str:
+    """Encrypt a password using the configured Fernet key."""
+    f = get_fernet()
+    return encrypt_value(f, password)
+
+
+def decrypt_password(token: str) -> str:
+    """Decrypt a Fernet-encrypted password token."""
+    f = get_fernet()
+    return decrypt_value(f, token)

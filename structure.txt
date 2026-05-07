@@ -1,29 +1,20 @@
-ln_bot/
-├── main.py                 # Entry point
-├── config.py               # Config & settings manager
-├── user_manager.py         # Multi-user system (per-Discord-ID profiles)
-├── requirements.txt        # Pinned dependencies
-├── .env.example            # Token template
+/storage/emulated/0/Documents/In_bot/lnut-bot/
+├── main.py
+├── .env
+├── .gitignore
+├── requirements.txt
+├── README.md
+├── scripts/
+│   └── push.sh
 ├── data/
-│   ├── users/              # Per-user profiles (JSON)
-│   │   └── {discord_id}.json
-│   ├── discovered_endpoints.json
+│   ├── accounts.json
 │   └── settings.json
-├── logs/
-│   └── bot.log
+├── utils/
+│   ├── encryption.py
+│   └── logger.py
 ├── automation/
-│   ├── __init__.py
-│   ├── stealth.py          # Stealth browser mode
-│   ├── discover.py         # Endpoint discovery
-│   └── api_direct.py       # API direct mode
-├── commands/
-│   ├── __init__.py
-│   ├── core.py             # /start, /stealth, /api, /discover
-│   ├── profiles.py         # /profile, /switchprofile, /deleteprofile
-│   ├── settings.py         # /set, /reset, /status
-│   └── backup.py           # /backup, /export, /import
-└── utils/
-    ├── __init__.py
-    ├── logger.py           # Logging system
-    ├── encryption.py       # Fernet encryption for passwords
-    └── helpers.py          # Shared helpers
+│   ├── api_direct.py
+│   └── task_handler.py
+└── commands/
+    ├── core.py
+    └── settings.py
