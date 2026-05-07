@@ -52,7 +52,7 @@ from utils.encryption import get_fernet
 
 logger = setup_logging()
 
-GUILD_ID_RAW = os.getenv("GUILD_ID", "1500945269267759268").strip()
+GUILD_ID_RAW = os.getenv("GUILD_ID", "").strip()
 try:
     GUILD_ID: Optional[int] = int(GUILD_ID_RAW) if GUILD_ID_RAW else None
 except ValueError:
@@ -94,13 +94,12 @@ class LanguageNutBot(commands.Bot):
 
         await self._load_cogs()
 
-        # Single consolidated commands cog - sync once
+        # Sync ONCE — guild-scoped if GUILD_ID set (instant), otherwise global (up to 1 hr)
         try:
             if GUILD_ID:
-                guild = discord.Object(id=GUILD_ID)
-                self.tree.copy_global_to(guild=guild)
-                synced = await self.tree.sync(guild=guild)
-                logger.info(f"Synced {len(synced)} guild commands to {GUILD_ID}")
+                guild_obj = discord.Object(id=GUILD_ID)
+                synced = await self.tree.sync(guild=guild_obj)
+                logger.info(f"Synced {len(synced)} commands to guild {GUILD_ID}")
             else:
                 synced = await self.tree.sync()
                 logger.info(f"Synced {len(synced)} global commands")
@@ -112,7 +111,6 @@ class LanguageNutBot(commands.Bot):
         logger.info("Setup complete")
 
     async def _load_cogs(self):
-        # Single unified commands module
         cogs: list[str] = ["commands.commands"]
 
         for cog in cogs:
@@ -130,7 +128,6 @@ class LanguageNutBot(commands.Bot):
     async def on_tree_error(
         self, interaction: discord.Interaction, error: Exception
     ):
-        # Unwrap CommandInvokeError
         orig = getattr(error, "original", error)
         logger.exception(f"Slash command error: {orig}")
 
