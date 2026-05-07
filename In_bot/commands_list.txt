@@ -1,0 +1,63 @@
+LANGUAGENUT BOT — COMMANDS LIST (v2)
+
+========================
+USER COMMANDS
+========================
+
+/login <username> <password>
+- Log in to LanguageNut, encrypts and stores credentials
+- Token auto-refreshes on expiry
+
+/logout
+- Remove stored credentials + token
+
+/homework
+- Lists all homework assignments with a paginated view
+- Shows completion percentages and progress
+- No more 25-field limit crash on many homeworks
+
+/do <task>
+- Run one or multiple tasks with autocomplete
+- Format: hwId:idx  (e.g. 123:0)
+- Multi-task: 123:0, 123:1, 456:2
+- Uses concurrency setting to run in parallel
+- Auto-retries on failure (configurable)
+- Autocomplete is cached for speed
+
+/settings
+- Interactive panel with persistent per-guild settings
+  • Speed (sec/task) via modal
+  • Min / Max Accuracy via modal
+  • Concurrency (1–8) via modal
+  • Retry attempts (0–5) via modal
+  • Toggle stealth mode
+  • Toggle auto-retry
+  • Reset to defaults
+
+/status
+- Bot latency, servers, users, python version, login state
+
+========================
+ADMIN COMMANDS (OWNER ONLY)
+========================
+
+/restart          - Restart the bot
+/shutdown         - Stop the bot
+/update           - git pull + restart
+/sync             - Sync slash commands (guild + global)
+/clear <amount>   - Delete recent messages (1–100)
+/logs             - Last 20 log lines
+/reload <cog>     - Reload a cog (accepts 'commands' or 'commands.commands')
+/eval <code>      - Async python eval sandbox
+/online           - Announce ONLINE ping
+/offline          - Announce OFFLINE ping
+
+========================
+SYSTEM NOTES
+========================
+
+- All credentials stored via Fernet encryption
+- Homework data cached for 20s for fast autocomplete
+- Completed (100%) tasks filtered from autocomplete
+- Discord 25-field embed limit fixed via pagination
+- Single consolidated commands file (commands/commands.py)

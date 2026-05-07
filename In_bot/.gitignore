@@ -1,28 +1,25 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
 *.py[cod]
 *$py.class
+*.so
+.Python
+*.egg-info/
 
 # Environments
 .env
-.env.local
+.env.*
 !.env.example
-.venv/
-env/
-venv/
 
 # Bot config and logs (contain secrets)
 config.json
-**/config.json
 logs/
 *.log
-
-# IDE
-.idea/
-.vscode/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# IDE
+.idea/
+.vscode/
