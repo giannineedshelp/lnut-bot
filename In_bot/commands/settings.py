@@ -21,6 +21,7 @@ class SettingsView(ui.View):
 
     @ui.button(label="âŒ Close", style=ButtonStyle.danger)
     async def close(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer(ephemeral=True)
         await interaction.message.delete()
 
 
