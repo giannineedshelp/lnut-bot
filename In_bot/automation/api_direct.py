@@ -21,10 +21,12 @@ logger = logging.getLogger("lnut_bot.api")
 SENSITIVE_PARAM_PARTS = ("pass", "password", "token", "authorization")
 
 # Pre-compiled regexes for task_link parsing
-_RE_SENTENCE = re.compile(r"sentenceCatalog=([a-zA-Z0-9-]+)")
-_RE_VERB      = re.compile(r"verbUid=([a-zA-Z0-9-]+)")
-_RE_PHONIC    = re.compile(r"phonicCatalogUid=([a-zA-Z0-9-]+)")
-_RE_EXAM      = re.compile(r"examUid=([a-zA-Z0-9-]+)")
+# These extract the UID value directly from the gameLink query string,
+# mirroring JS task_completer.get_task_type() + constructor logic.
+_RE_SENTENCE = re.compile(r"sentenceCatalog=([a-zA-Z0-9_-]+)")
+_RE_VERB      = re.compile(r"verbUid=([a-zA-Z0-9_-]+)")
+_RE_PHONIC    = re.compile(r"phonicCatalogUid=([a-zA-Z0-9_-]+)")
+_RE_EXAM      = re.compile(r"examUid=([a-zA-Z0-9_-]+)")
 
 
 def _safe_params(params: dict) -> dict:
@@ -53,7 +55,19 @@ def _get_catalog_uid(task: dict) -> str:
             uid = base[-1]
     if not uid:
         uid = task.get("game_uid") or task.get("gameUid", "")
-    return uid
+    return str(uid) if uid else ""
+
+
+def _get_homework_uid(task: dict, homework: dict) -> str:
+    """
+    Mirrors JS: homework_id = task.base[0]
+    Falls back to homework dict id if base is absent.
+    """
+    base = task.get("base", [])
+    if base:
+        return str(base[0])
+    # Fallback: use the homework object's id
+    return str(homework.get("id", ""))
 
 
 def _get_task_mode(game_link: str) -> str:
@@ -135,7 +149,7 @@ class LNApiClient:
             logger.error(f"Login failed: {data}")
         return token
 
-    # ----- Task-data fetchers (now match JS params exactly) -----
+    # ----- Task-data fetchers (match JS params exactly) -----
 
     async def get_sentences(
         self,
@@ -156,7 +170,7 @@ class LNApiClient:
                 "token": self.token,
             },
         )
-        return data.get("sentenceTranslations", [])
+        return data.get("sentenceTranslations", []) or []
 
     async def get_verbs(
         self,
@@ -177,7 +191,7 @@ class LNApiClient:
                 "token": self.token,
             },
         )
-        return data.get("verbTranslations", [])
+        return data.get("verbTranslations", []) or []
 
     async def get_phonics(
         self,
@@ -198,7 +212,7 @@ class LNApiClient:
                 "token": self.token,
             },
         )
-        return data.get("phonics", [])
+        return data.get("phonics", []) or []
 
     async def get_exam(
         self,
@@ -221,7 +235,7 @@ class LNApiClient:
                 "token": self.token,
             },
         )
-        return data.get("examTranslations", [])
+        return data.get("examTranslations", []) or []
 
     async def get_vocabs(
         self,
@@ -243,7 +257,7 @@ class LNApiClient:
                 "token": self.token,
             },
         )
-        return data.get("vocabTranslations", [])
+        return data.get("vocabTranslations", []) or []
 
     async def fetch_task_data(
         self,
@@ -255,36 +269,39 @@ class LNApiClient:
         """
         Route task to the correct fetcher based on gameLink pattern.
         Mirrors JS task_completer.get_data() + get_task_type().
-        Now correctly passes token + language codes to every fetcher.
+
+        Priority: extract UID directly from gameLink regex match,
+        fall back to _get_catalog_uid(task) if regex has no capture.
         """
         catalog_uid = _get_catalog_uid(task)
         game_uid    = task.get("gameUid") or task.get("game_uid", "")
 
         if m := _RE_SENTENCE.search(game_link):
             uid = m.group(1) or catalog_uid
-            logger.info(f"Fetching sentence data uid={uid[:12]}")
+            logger.info("Fetching sentence data uid=%s", uid[:12] if uid else "?")
             return await self.get_sentences(uid, to_language, from_language)
 
         if m := _RE_VERB.search(game_link):
             uid = m.group(1) or catalog_uid
-            logger.info(f"Fetching verb data uid={uid[:12]}")
+            logger.info("Fetching verb data uid=%s", uid[:12] if uid else "?")
             return await self.get_verbs(uid, to_language, from_language)
 
         if m := _RE_PHONIC.search(game_link):
             uid = m.group(1) or catalog_uid
-            logger.info(f"Fetching phonic data uid={uid[:12]}")
+            logger.info("Fetching phonic data uid=%s", uid[:12] if uid else "?")
             return await self.get_phonics(uid, to_language, from_language)
 
         if m := _RE_EXAM.search(game_link):
             uid = m.group(1) or catalog_uid
-            logger.info(f"Fetching exam data uid={uid[:12]}")
+            logger.info("Fetching exam data uid=%s", uid[:12] if uid else "?")
             return await self.get_exam(game_uid, uid, to_language, from_language)
 
+        # Default: vocabs
         if not catalog_uid:
-            logger.warning("No catalog_uid in task, cannot fetch vocabs")
+            logger.warning("No catalog_uid in task, cannot fetch vocabs. task keys: %s", list(task.keys()))
             return []
 
-        logger.info(f"Fetching vocab data uid={catalog_uid[:12]}")
+        logger.info("Fetching vocab data uid=%s", catalog_uid[:12] if catalog_uid else "?")
         return await self.get_vocabs(catalog_uid, to_language, from_language)
 
     async def submit_score(
@@ -297,36 +314,40 @@ class LNApiClient:
         Submit a completed task score.
 
         Payload mirrors JS send_answers() exactly:
-          moduleUid, gameUid, gameType, isTest, toietf, fromietf,
-          score, correctVocabs, incorrectVocabs, homeworkUid,
-          isSentence, isALevel, isVerb, verbUid, phonicUid,
-          sentenceScreenUid, sentenceCatalogUid, grammarCatalogUid,
-          isGrammar, isExam, correctStudentAns, incorrectStudentAns,
-          timeStamp, vocabNumber, rel_module_uid, dontStoreStats,
-          product, token
+          - score = vocabs.length * 200  (ALL vocabs, not just correct ones)
+          - correctVocabs = comma-joined UIDs of correct answers
+          - incorrectVocabs = [] empty (matches JS behaviour)
+          - timeStamp = Math.floor(speed + jitter) * 1000
+          - homeworkUid = task.base[0] (mirrors JS: this.homework_id = task.base[0])
         """
         if not task_data:
             logger.warning("No task data to submit")
             return {"error": "No data"}
 
-        game_link   = task.get("gameLink", "")
-        mode        = _get_task_mode(game_link)
-        catalog_uid = _get_catalog_uid(task)
-        game_uid    = task.get("gameUid") or task.get("game_uid", "")
-        game_type   = task.get("type", "")
-        homework_uid = str(homework.get("id", ""))
-        to_language  = homework.get("languageCode", "")
+        # Guard: stealth must be set
+        if self.stealth is None:
+            logger.error("StealthManager not set on LNApiClient")
+            return {"error": "No stealth manager"}
+
+        game_link      = task.get("gameLink", "")
+        mode           = _get_task_mode(game_link)
+        catalog_uid    = _get_catalog_uid(task)
+        game_uid       = task.get("gameUid") or task.get("game_uid", "")
+        game_type      = task.get("type", "")
+        # Mirrors JS: this.homework_id = task.base[0]
+        homework_uid   = _get_homework_uid(task, homework)
+        to_language    = homework.get("languageCode", "")
         rel_module_uid = task.get("rel_module_uid", "")
 
         # Apply stealth accuracy — decide which vocabs are "correct"
         correct_indices, incorrect_indices = self.stealth.apply_accuracy(len(task_data))
-        correct_set   = set(correct_indices)
-        incorrect_set = set(incorrect_indices)
 
-        correct_vocabs   = [task_data[i].get("uid", "") for i in sorted(correct_set)]
-        incorrect_vocabs = [task_data[i].get("uid", "") for i in sorted(incorrect_set)]
+        correct_vocabs   = [task_data[i].get("uid", "") for i in sorted(correct_indices) if i < len(task_data)]
+        # incorrect_vocabs is intentionally empty like JS (JS sends incorrectVocabs: [])
+        incorrect_vocabs: list[str] = []
 
-        score = len(correct_vocabs) * 200
+        # JS: score = vocabs.length * 200  (uses TOTAL count, not just correct)
+        score = len(task_data) * 200
 
         # Stealth timestamp (JS: Math.floor(speed + jitter) * 1000)
         timestamp_ms = self.stealth.compute_timestamp()
@@ -347,12 +368,12 @@ class LNApiClient:
             # Language
             "toietf":             to_language,
             "fromietf":           "en-US",
-            # Score
+            # Score — JS: score = vocabs.length * 200
             "score":              str(score),
             "vocabNumber":        str(len(task_data)),
             "correctVocabs":      ",".join(correct_vocabs),
-            "incorrectVocabs":    ",".join(incorrect_vocabs),
-            # Homework linkage
+            "incorrectVocabs":    "",   # JS sends [] which URLencodes to empty
+            # Homework linkage — JS: homeworkUid = task.base[0]
             "homeworkUid":        homework_uid,
             "rel_module_uid":     rel_module_uid,
             # Mode-specific UIDs (blank when not applicable, mirrors JS ternary)
@@ -372,9 +393,13 @@ class LNApiClient:
         }
 
         logger.info(
-            f"Submitting score: mode={mode} uid={game_uid[:12]} "
-            f"score={score} time={timestamp_ms}ms "
-            f"correct={len(correct_vocabs)}/{len(task_data)}"
+            "Submitting score: mode=%s uid=%s score=%d time=%dms correct=%d/%d",
+            mode,
+            (game_uid[:12] if game_uid else "?"),
+            score,
+            timestamp_ms,
+            len(correct_vocabs),
+            len(task_data),
         )
 
         response = await self.call_lnut(
@@ -382,8 +407,8 @@ class LNApiClient:
         )
 
         if response.get("error"):
-            logger.error(f"Score submission failed: {response}")
+            logger.error("Score submission failed: %s", response)
         else:
-            logger.info(f"Score submitted OK: {response.get('score', {})}")
+            logger.info("Score submitted OK: %s", response.get("score", {}))
 
         return response

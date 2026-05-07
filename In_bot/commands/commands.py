@@ -26,7 +26,7 @@ from discord.ext import commands
 import config
 from automation.api_direct import LNApiClient
 from automation.discover import HomeworkDiscoverer
-from automation.stealth import StealthManager
+from automation.stealth import StealthManager, seconds_to_human
 from utils.encryption import decrypt_value, encrypt_value
 
 logger = logging.getLogger("lnut_bot.commands")
@@ -101,18 +101,28 @@ async def safe_send(
         else:
             await interaction.response.send_message(**kwargs)
     except discord.HTTPException as e:
-        logger.error(f"Send failed: {e}")
+        logger.error("Send failed: %s", e)
 
 
 # ============================================================
 # SETTINGS PANEL
 # ============================================================
 class SettingModal(ui.Modal):
+    """
+    Generic single-field modal for editing a setting.
+
+    Validates that:
+      - The raw value can be cast with `caster`
+      - `validator(value)` returns True
+      - For accuracy fields, min_accuracy <= max_accuracy is enforced
+        after the change is applied.
+    """
+
     def __init__(self, key, label, current, caster, validator, parent_view):
         super().__init__(title=f"Update {label}")
-        self.key = key
-        self.caster = caster
-        self.validator = validator
+        self.key         = key
+        self.caster      = caster
+        self.validator   = validator
         self.parent_view = parent_view
         self.field = ui.TextInput(
             label=label,
@@ -124,111 +134,157 @@ class SettingModal(ui.Modal):
         self.add_item(self.field)
 
     async def on_submit(self, interaction: Interaction):
+        raw = self.field.value.strip()
         try:
-            value = self.caster(self.field.value.strip())
+            value = self.caster(raw)
             if not self.validator(value):
                 raise ValueError("Value out of allowed range.")
         except (ValueError, TypeError) as e:
             await safe_send(interaction, f"❌ Invalid value: {e}")
             return
+
         if interaction.guild_id is None:
             await safe_send(interaction, "❌ Guild only command.")
             return
+
+        # Cross-field validation: keep min_accuracy <= max_accuracy
+        if self.key in ("min_accuracy", "max_accuracy"):
+            current_settings = config.get_guild_settings(interaction.guild_id)
+            if self.key == "min_accuracy":
+                max_acc = current_settings.get("max_accuracy", 100)
+                if value > max_acc:
+                    await safe_send(
+                        interaction,
+                        f"❌ Min accuracy ({value}%) cannot exceed max accuracy ({max_acc}%)."
+                    )
+                    return
+            elif self.key == "max_accuracy":
+                min_acc = current_settings.get("min_accuracy", 0)
+                if value < min_acc:
+                    await safe_send(
+                        interaction,
+                        f"❌ Max accuracy ({value}%) cannot be less than min accuracy ({min_acc}%)."
+                    )
+                    return
+
         config.set_guild_setting(interaction.guild_id, self.key, value)
         embed = self.parent_view.build_embed(interaction.guild_id)
         await interaction.response.edit_message(embed=embed, view=self.parent_view)
 
 
 class SettingsView(ui.View):
+    """
+    Interactive settings panel.
+
+    Displays all configurable options and provides buttons to edit them.
+    Settings are saved immediately on change.
+    """
+
     def __init__(self, guild_id: int):
         super().__init__(timeout=180)
         self.guild_id = guild_id
 
     def build_embed(self, guild_id: int) -> discord.Embed:
-        s = config.get_guild_settings(guild_id)
-        from automation.stealth import seconds_to_human
-        fake_exp  = s["fake_time_exponent"]
-        fake_secs = 10 ** fake_exp
-        fake_str  = seconds_to_human(fake_secs)
+        s          = config.get_guild_settings(guild_id)
+        fake_exp   = s["fake_time_exponent"]
+        fake_secs  = 10 ** fake_exp
+        fake_str   = seconds_to_human(fake_secs)
+
+        # Real speed display (normal mode)
+        real_speed_str = seconds_to_human(s["speed"])
+
         embed = discord.Embed(
             title="⚙️ LanguageNut Bot Settings",
-            description="Configure automation behavior. Changes are saved immediately.",
+            description=(
+                "Configure automation behaviour.\n"
+                "Changes are saved immediately and apply to all future tasks."
+            ),
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="⏱️ Speed (sec/task)", value=f"`{s['speed']}`", inline=True)
-        embed.add_field(name="🎯 Accuracy Range", value=f"`{s['min_accuracy']}% – {s['max_accuracy']}%`", inline=True)
-        embed.add_field(name="⚡ Concurrency", value=f"`{s['concurrency']}` parallel tasks", inline=True)
-        embed.add_field(name="🛡️ Stealth", value="`ON`" if s["stealth_enabled"] else "`OFF`", inline=True)
-        embed.add_field(name="🔁 Auto Retry", value=f"`{'ON' if s['auto_retry'] else 'OFF'}` ({s['retry_attempts']}x)", inline=True)
+
+        # ── Timing ────────────────────────────────────────────────────────
+        embed.add_field(
+            name="⏱️ Speed (sec/task)",
+            value=(
+                f"`{s['speed']}s`\n"
+                f"*({real_speed_str})*"
+            ),
+            inline=True,
+        )
         embed.add_field(
             name="🕰️ Fake Time",
             value=(
-                f"`{'ON' if s['fake_time_enabled'] else 'OFF'}` "
-                f"— exponent `{fake_exp}` → `{fake_str}`"
+                f"`{'ON' if s['fake_time_enabled'] else 'OFF'}`  "
+                f"— exponent `{fake_exp}`\n"
+                f"*10^{fake_exp} = {fake_str}*"
             ),
-            inline=False,
+            inline=True,
         )
-        embed.set_footer(text="Changes apply immediately to future tasks.")
+        embed.add_field(name="\u200b", value="\u200b", inline=True)  # spacer
+
+        # ── Accuracy ──────────────────────────────────────────────────────
+        acc_bar = _progress_bar(
+            round((s["min_accuracy"] + s["max_accuracy"]) / 2), length=10
+        )
+        embed.add_field(
+            name="🎯 Accuracy Range",
+            value=(
+                f"`{s['min_accuracy']}%` – `{s['max_accuracy']}%`\n"
+                f"`{acc_bar}` avg {round((s['min_accuracy'] + s['max_accuracy']) / 2)}%"
+            ),
+            inline=True,
+        )
+
+        # ── Concurrency & retry ───────────────────────────────────────────
+        embed.add_field(
+            name="⚡ Concurrency",
+            value=f"`{s['concurrency']}` parallel tasks",
+            inline=True,
+        )
+        embed.add_field(
+            name="🔁 Auto Retry",
+            value=f"`{'ON' if s['auto_retry'] else 'OFF'}` ({s['retry_attempts']}×)",
+            inline=True,
+        )
+
+        # ── Stealth ───────────────────────────────────────────────────────
+        embed.add_field(
+            name="🛡️ Stealth",
+            value="`ON`" if s["stealth_enabled"] else "`OFF`",
+            inline=True,
+        )
+
+        embed.set_footer(text="Changes apply immediately to all future tasks.")
         return embed
 
+    # ── Timing buttons ────────────────────────────────────────────────────
     @ui.button(label="⏱️ Speed", style=ButtonStyle.primary, row=0)
     async def speed_btn(self, interaction: Interaction, _: ui.Button):
         s = config.get_guild_settings(interaction.guild_id)
-        await interaction.response.send_modal(SettingModal("speed", "Seconds per task (3–120)", s["speed"], float, lambda v: 3.0 <= v <= 120.0, self))
+        await interaction.response.send_modal(
+            SettingModal(
+                "speed", "Seconds per task (3–3600)",
+                s["speed"], float, lambda v: 3.0 <= v <= 3600.0, self,
+            )
+        )
 
-    @ui.button(label="🎯 Min Accuracy", style=ButtonStyle.primary, row=0)
-    async def min_acc_btn(self, interaction: Interaction, _: ui.Button):
-        s = config.get_guild_settings(interaction.guild_id)
-        await interaction.response.send_modal(SettingModal("min_accuracy", "Min accuracy % (50–100)", s["min_accuracy"], int, lambda v: 50 <= v <= 100, self))
-
-    @ui.button(label="🎯 Max Accuracy", style=ButtonStyle.primary, row=0)
-    async def max_acc_btn(self, interaction: Interaction, _: ui.Button):
-        s = config.get_guild_settings(interaction.guild_id)
-        await interaction.response.send_modal(SettingModal("max_accuracy", "Max accuracy % (50–100)", s["max_accuracy"], int, lambda v: 50 <= v <= 100, self))
-
-    @ui.button(label="⚡ Concurrency", style=ButtonStyle.success, row=1)
-    async def conc_btn(self, interaction: Interaction, _: ui.Button):
-        s = config.get_guild_settings(interaction.guild_id)
-        await interaction.response.send_modal(SettingModal("concurrency", "Parallel tasks (1–8)", s["concurrency"], int, lambda v: 1 <= v <= 8, self))
-
-    @ui.button(label="🔁 Retry Attempts", style=ButtonStyle.success, row=1)
-    async def retry_btn(self, interaction: Interaction, _: ui.Button):
-        s = config.get_guild_settings(interaction.guild_id)
-        await interaction.response.send_modal(SettingModal("retry_attempts", "Retry attempts (0–5)", s["retry_attempts"], int, lambda v: 0 <= v <= 5, self))
-
-    @ui.button(label="🛡️ Toggle Stealth", style=ButtonStyle.secondary, row=2)
-    async def stealth_btn(self, interaction: Interaction, _: ui.Button):
-        if interaction.guild_id is None:
-            await safe_send(interaction, "❌ Guild only.")
-            return
-        s = config.get_guild_settings(interaction.guild_id)
-        config.set_guild_setting(interaction.guild_id, "stealth_enabled", not s["stealth_enabled"])
-        await interaction.response.edit_message(embed=self.build_embed(interaction.guild_id), view=self)
-
-    @ui.button(label="🔁 Toggle Auto-Retry", style=ButtonStyle.secondary, row=2)
-    async def autoretry_btn(self, interaction: Interaction, _: ui.Button):
-        if interaction.guild_id is None:
-            await safe_send(interaction, "❌ Guild only.")
-            return
-        s = config.get_guild_settings(interaction.guild_id)
-        config.set_guild_setting(interaction.guild_id, "auto_retry", not s["auto_retry"])
-        await interaction.response.edit_message(embed=self.build_embed(interaction.guild_id), view=self)
-
-    @ui.button(label="🕰️ Fake Time Exp", style=ButtonStyle.primary, row=3)
+    @ui.button(label="🕰️ Fake Time Exp", style=ButtonStyle.primary, row=0)
     async def fake_time_exp_btn(self, interaction: Interaction, _: ui.Button):
         s = config.get_guild_settings(interaction.guild_id)
+        exp = s["fake_time_exponent"]
+        current_display = f"{exp}  (= {seconds_to_human(10 ** exp)})"
         await interaction.response.send_modal(
             SettingModal(
                 "fake_time_exponent",
                 "Fake time exponent (0.0–7.0)  [10^x seconds]",
-                s["fake_time_exponent"],
+                current_display,
                 float,
                 lambda v: 0.0 <= v <= 7.0,
                 self,
             )
         )
 
-    @ui.button(label="🕰️ Toggle Fake Time", style=ButtonStyle.secondary, row=3)
+    @ui.button(label="🕰️ Toggle Fake Time", style=ButtonStyle.secondary, row=0)
     async def fake_time_toggle_btn(self, interaction: Interaction, _: ui.Button):
         if interaction.guild_id is None:
             await safe_send(interaction, "❌ Guild only.")
@@ -237,6 +293,68 @@ class SettingsView(ui.View):
         config.set_guild_setting(interaction.guild_id, "fake_time_enabled", not s["fake_time_enabled"])
         await interaction.response.edit_message(embed=self.build_embed(interaction.guild_id), view=self)
 
+    # ── Accuracy buttons ──────────────────────────────────────────────────
+    @ui.button(label="🎯 Min Accuracy", style=ButtonStyle.primary, row=1)
+    async def min_acc_btn(self, interaction: Interaction, _: ui.Button):
+        s = config.get_guild_settings(interaction.guild_id)
+        await interaction.response.send_modal(
+            SettingModal(
+                "min_accuracy", "Min accuracy % (0–100)",
+                s["min_accuracy"], int, lambda v: 0 <= v <= 100, self,
+            )
+        )
+
+    @ui.button(label="🎯 Max Accuracy", style=ButtonStyle.primary, row=1)
+    async def max_acc_btn(self, interaction: Interaction, _: ui.Button):
+        s = config.get_guild_settings(interaction.guild_id)
+        await interaction.response.send_modal(
+            SettingModal(
+                "max_accuracy", "Max accuracy % (0–100)",
+                s["max_accuracy"], int, lambda v: 0 <= v <= 100, self,
+            )
+        )
+
+    # ── Concurrency & retry buttons ───────────────────────────────────────
+    @ui.button(label="⚡ Concurrency", style=ButtonStyle.success, row=2)
+    async def conc_btn(self, interaction: Interaction, _: ui.Button):
+        s = config.get_guild_settings(interaction.guild_id)
+        await interaction.response.send_modal(
+            SettingModal(
+                "concurrency", "Parallel tasks (1–8)",
+                s["concurrency"], int, lambda v: 1 <= v <= 8, self,
+            )
+        )
+
+    @ui.button(label="🔁 Retry Attempts", style=ButtonStyle.success, row=2)
+    async def retry_btn(self, interaction: Interaction, _: ui.Button):
+        s = config.get_guild_settings(interaction.guild_id)
+        await interaction.response.send_modal(
+            SettingModal(
+                "retry_attempts", "Retry attempts (0–5)",
+                s["retry_attempts"], int, lambda v: 0 <= v <= 5, self,
+            )
+        )
+
+    # ── Toggle buttons ────────────────────────────────────────────────────
+    @ui.button(label="🛡️ Toggle Stealth", style=ButtonStyle.secondary, row=3)
+    async def stealth_btn(self, interaction: Interaction, _: ui.Button):
+        if interaction.guild_id is None:
+            await safe_send(interaction, "❌ Guild only.")
+            return
+        s = config.get_guild_settings(interaction.guild_id)
+        config.set_guild_setting(interaction.guild_id, "stealth_enabled", not s["stealth_enabled"])
+        await interaction.response.edit_message(embed=self.build_embed(interaction.guild_id), view=self)
+
+    @ui.button(label="🔁 Toggle Auto-Retry", style=ButtonStyle.secondary, row=3)
+    async def autoretry_btn(self, interaction: Interaction, _: ui.Button):
+        if interaction.guild_id is None:
+            await safe_send(interaction, "❌ Guild only.")
+            return
+        s = config.get_guild_settings(interaction.guild_id)
+        config.set_guild_setting(interaction.guild_id, "auto_retry", not s["auto_retry"])
+        await interaction.response.edit_message(embed=self.build_embed(interaction.guild_id), view=self)
+
+    # ── Reset / Close ─────────────────────────────────────────────────────
     @ui.button(label="♻️ Reset Defaults", style=ButtonStyle.danger, row=4)
     async def reset_btn(self, interaction: Interaction, _: ui.Button):
         if interaction.guild_id is None:
@@ -258,10 +376,10 @@ class HomeworkPaginator(ui.View):
 
     def __init__(self, homeworks: list[dict], user_id: int):
         super().__init__(timeout=300)
-        self.homeworks = homeworks
-        self.user_id = user_id
-        self.page = 0
-        self.total_pages = max(1, (len(homeworks) + self.PER_PAGE - 1) // self.PER_PAGE)
+        self.homeworks    = homeworks
+        self.user_id      = user_id
+        self.page         = 0
+        self.total_pages  = max(1, (len(homeworks) + self.PER_PAGE - 1) // self.PER_PAGE)
         self._update_button_state()
 
     def _update_button_state(self):
@@ -272,34 +390,36 @@ class HomeworkPaginator(ui.View):
         start = self.page * self.PER_PAGE
         chunk = self.homeworks[start:start + self.PER_PAGE]
 
-        total_tasks = sum(len(hw.get("tasks", [])) for hw in self.homeworks)
-        total_done = sum(1 for hw in self.homeworks for t in hw.get("tasks", []) if _is_done(t))
-        incomplete_count = total_tasks - total_done
+        total_tasks    = sum(len(hw.get("tasks", [])) for hw in self.homeworks)
+        total_done     = sum(1 for hw in self.homeworks for t in hw.get("tasks", []) if _is_done(t))
+        incomplete_cnt = total_tasks - total_done
 
         embed = discord.Embed(
             title="📚 LanguageNut Homework",
             description=(
                 f"**{len(self.homeworks)}** assignment(s) • "
                 f"**{total_tasks}** total tasks • "
-                f"**{incomplete_count}** incomplete"
+                f"**{incomplete_cnt}** incomplete"
             ),
             color=discord.Color.blue(),
         )
-        embed.set_footer(text=f"Page {self.page + 1}/{self.total_pages}  •  Use /do to complete tasks")
+        embed.set_footer(
+            text=f"Page {self.page + 1}/{self.total_pages}  •  Use /do to complete tasks"
+        )
 
         for hw in chunk:
-            name = hw.get("name", "Unnamed")
-            hw_id = hw.get("id", "?")
-            tasks = hw.get("tasks", [])
-            total = len(tasks)
-            done = sum(1 for t in tasks if _is_done(t))
-            pct_overall = round((done / total * 100) if total else 0)
-            bar = _progress_bar(pct_overall)
+            name    = hw.get("name", "Unnamed")
+            hw_id   = hw.get("id", "?")
+            tasks   = hw.get("tasks", [])
+            total   = len(tasks)
+            done    = sum(1 for t in tasks if _is_done(t))
+            pct_all = round((done / total * 100) if total else 0)
+            bar     = _progress_bar(pct_all)
 
-            lines = [f"`{bar}` **{pct_overall}%** ({done}/{total} done)"]
+            lines = [f"`{bar}` **{pct_all}%** ({done}/{total} done)"]
             incomplete_tasks = [t for t in tasks if not _is_done(t)]
             for task in incomplete_tasks[:5]:
-                p = _pct(task)
+                p         = _pct(task)
                 task_name = task.get("translation", "Unknown")
                 if len(task_name) > 38:
                     task_name = task_name[:35] + "..."
@@ -352,15 +472,15 @@ class HomeworkSelect(ui.Select):
             )
         ]
         for hw in homeworks[:24]:
-            hw_id = str(hw.get("id", "?"))
-            name = hw.get("name", "Unnamed")
-            tasks = hw.get("tasks", [])
+            hw_id      = str(hw.get("id", "?"))
+            name       = hw.get("name", "Unnamed")
+            tasks      = hw.get("tasks", [])
             incomplete = [t for t in tasks if not _is_done(t)]
             if not incomplete:
                 continue
             total = len(tasks)
-            done = total - len(incomplete)
-            pct = round((done / total * 100) if total else 0)
+            done  = total - len(incomplete)
+            pct   = round((done / total * 100) if total else 0)
             label = name[:95] if len(name) <= 95 else name[:92] + "..."
             options.append(
                 discord.SelectOption(
@@ -371,49 +491,82 @@ class HomeworkSelect(ui.Select):
                 )
             )
         if len(options) == 1:
-            options = [discord.SelectOption(label="No incomplete homework", value="__NONE__", description="All tasks are at 100%")]
+            options = [
+                discord.SelectOption(
+                    label="No incomplete homework",
+                    value="__NONE__",
+                    description="All tasks are at 100%",
+                )
+            ]
 
-        super().__init__(placeholder="📚 Select a homework assignment…", min_values=1, max_values=1, options=options)
+        super().__init__(
+            placeholder="📚 Select a homework assignment…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
 
     async def callback(self, interaction: Interaction):
         view: DoHomeworkView = self.view  # type: ignore
         chosen = self.values[0]
 
         if chosen == "__NONE__":
-            await interaction.response.edit_message(content="✅ All homework is already at 100%!", embed=None, view=None)
+            await interaction.response.edit_message(
+                content="✅ All homework is already at 100%!", embed=None, view=None
+            )
             return
 
         if chosen == "__ALL__":
-            jobs = [(hw, t) for hw in self.homeworks for t in hw.get("tasks", []) if not _is_done(t)]
+            jobs = [
+                (hw, t)
+                for hw in self.homeworks
+                for t in hw.get("tasks", [])
+                if not _is_done(t)
+            ]
             if not jobs:
-                await interaction.response.edit_message(content="✅ Nothing left to do!", embed=None, view=None)
+                await interaction.response.edit_message(
+                    content="✅ Nothing left to do!", embed=None, view=None
+                )
                 return
-            # Acknowledge the interaction and kick off jobs using the followup webhook
             await interaction.response.edit_message(
                 content=f"⏳ Starting **{len(jobs)}** task(s) across all assignments…",
-                embed=None, view=None,
+                embed=None,
+                view=None,
             )
             asyncio.create_task(
                 _execute_jobs(interaction.followup, jobs, view.cog, view.guild_id)
             )
             return
 
-        target_hw = next((h for h in self.homeworks if str(h.get("id", "")) == chosen), None)
+        # Single homework selected — find by id string match
+        target_hw = next(
+            (h for h in self.homeworks if str(h.get("id", "")) == chosen), None
+        )
         if not target_hw:
-            await interaction.response.edit_message(content="❌ Homework not found.", embed=None, view=None)
+            await interaction.response.edit_message(
+                content="❌ Homework not found.", embed=None, view=None
+            )
             return
 
         task_view = DoTaskView(target_hw, view.cog, view.guild_id, view.user_id)
-        await interaction.response.edit_message(content=None, embed=task_view.build_embed(), view=task_view)
+        await interaction.response.edit_message(
+            content=None, embed=task_view.build_embed(), view=task_view
+        )
 
 
 class DoHomeworkView(ui.View):
-    def __init__(self, homeworks: list[dict], cog: "BotCommands", guild_id: int, user_id: int):
+    def __init__(
+        self,
+        homeworks: list[dict],
+        cog: "BotCommands",
+        guild_id: int,
+        user_id: int,
+    ):
         super().__init__(timeout=180)
         self.homeworks = homeworks
-        self.cog = cog
-        self.guild_id = guild_id
-        self.user_id = user_id
+        self.cog       = cog
+        self.guild_id  = guild_id
+        self.user_id   = user_id
         self.add_item(HomeworkSelect(homeworks))
 
     async def interaction_check(self, interaction: Interaction) -> bool:
@@ -431,9 +584,18 @@ class DoHomeworkView(ui.View):
 # /do — STEP 2: Task multi-selector
 # ============================================================
 class TaskSelect(ui.Select):
+    """
+    Select individual tasks within a homework assignment.
+
+    Task values are stored as their list index (str) so we can look them
+    up directly with `tasks[int(val)]` — this is the correct approach
+    mirroring the JS `c.id.split("-")` → `homeworks[parts[0]].tasks[parts[1]]`.
+    """
+
     def __init__(self, homework: dict):
         self.homework = homework
-        tasks = homework.get("tasks", [])
+        tasks      = homework.get("tasks", [])
+        # Build (original_index, task) pairs for incomplete tasks only
         incomplete = [(i, t) for i, t in enumerate(tasks) if not _is_done(t)]
 
         options: list[discord.SelectOption] = [
@@ -445,11 +607,17 @@ class TaskSelect(ui.Select):
             )
         ]
         for idx, task in incomplete[:24]:
-            p = _pct(task)
+            p         = _pct(task)
             task_name = task.get("translation", "Unknown")
-            label = task_name[:95] if len(task_name) <= 95 else task_name[:92] + "..."
+            label     = task_name[:95] if len(task_name) <= 95 else task_name[:92] + "..."
             options.append(
-                discord.SelectOption(label=label, value=str(idx), description=f"{p}% complete", emoji="📝")
+                discord.SelectOption(
+                    label=label,
+                    # Store the REAL list index so tasks[int(val)] works correctly
+                    value=str(idx),
+                    description=f"{p}% complete",
+                    emoji="📝",
+                )
             )
 
         super().__init__(
@@ -461,7 +629,7 @@ class TaskSelect(ui.Select):
 
     async def callback(self, interaction: Interaction):
         view: DoTaskView = self.view  # type: ignore
-        tasks = self.homework.get("tasks", [])
+        tasks  = self.homework.get("tasks", [])
         chosen = self.values
 
         if "__ALL__" in chosen:
@@ -473,16 +641,21 @@ class TaskSelect(ui.Select):
                     idx = int(val)
                     if 0 <= idx < len(tasks):
                         jobs.append((self.homework, tasks[idx]))
+                    else:
+                        logger.warning("Task index %d out of range (len=%d)", idx, len(tasks))
                 except ValueError:
-                    pass
+                    logger.warning("Non-integer task value in select: %r", val)
 
         if not jobs:
-            await interaction.response.edit_message(content="❌ No valid tasks selected.", embed=None, view=None)
+            await interaction.response.edit_message(
+                content="❌ No valid tasks selected.", embed=None, view=None
+            )
             return
 
         await interaction.response.edit_message(
             content=f"⏳ Starting **{len(jobs)}** task(s)…",
-            embed=None, view=None,
+            embed=None,
+            view=None,
         )
         asyncio.create_task(
             _execute_jobs(interaction.followup, jobs, view.cog, view.guild_id)
@@ -490,27 +663,33 @@ class TaskSelect(ui.Select):
 
 
 class DoTaskView(ui.View):
-    def __init__(self, homework: dict, cog: "BotCommands", guild_id: int, user_id: int):
+    def __init__(
+        self,
+        homework: dict,
+        cog: "BotCommands",
+        guild_id: int,
+        user_id: int,
+    ):
         super().__init__(timeout=180)
-        self.homework = homework
-        self.cog = cog
-        self.guild_id = guild_id
-        self.user_id = user_id
+        self.homework  = homework
+        self.cog       = cog
+        self.guild_id  = guild_id
+        self.user_id   = user_id
         self.add_item(TaskSelect(homework))
 
     def build_embed(self) -> discord.Embed:
-        hw = self.homework
-        name = hw.get("name", "Unnamed")
-        tasks = hw.get("tasks", [])
-        total = len(tasks)
-        done = sum(1 for t in tasks if _is_done(t))
-        pct_overall = round((done / total * 100) if total else 0)
-        bar = _progress_bar(pct_overall)
+        hw      = self.homework
+        name    = hw.get("name", "Unnamed")
+        tasks   = hw.get("tasks", [])
+        total   = len(tasks)
+        done    = sum(1 for t in tasks if _is_done(t))
+        pct_all = round((done / total * 100) if total else 0)
+        bar     = _progress_bar(pct_all)
 
         embed = discord.Embed(
             title=f"📖 {name}",
             description=(
-                f"`{bar}` **{pct_overall}%** complete ({done}/{total} tasks done)\n\n"
+                f"`{bar}` **{pct_all}%** complete ({done}/{total} tasks done)\n\n"
                 "Select which tasks to complete below."
             ),
             color=discord.Color.orange(),
@@ -519,14 +698,18 @@ class DoTaskView(ui.View):
         if incomplete:
             lines = []
             for task in incomplete[:10]:
-                p = _pct(task)
+                p         = _pct(task)
                 task_name = task.get("translation", "Unknown")
                 if len(task_name) > 40:
                     task_name = task_name[:37] + "..."
                 lines.append(f"📝 `{p}%` — {task_name}")
             if len(incomplete) > 10:
                 lines.append(f"*…and {len(incomplete) - 10} more*")
-            embed.add_field(name=f"📋 Incomplete Tasks ({len(incomplete)})", value="\n".join(lines), inline=False)
+            embed.add_field(
+                name=f"📋 Incomplete Tasks ({len(incomplete)})",
+                value="\n".join(lines),
+                inline=False,
+            )
         embed.set_footer(text="Pick one or many tasks, or choose 'Do ALL' to complete everything.")
         return embed
 
@@ -538,10 +721,14 @@ class DoTaskView(ui.View):
 
     @ui.button(label="◀ Back", style=ButtonStyle.secondary, row=1)
     async def back_btn(self, interaction: Interaction, _: ui.Button):
-        cached = self.cog._hw_cache.get(self.guild_id, (0, []))[1]
+        cached         = self.cog._hw_cache.get(self.guild_id, (0, []))[1]
         incomplete_hws = [hw for hw in cached if any(not _is_done(t) for t in hw.get("tasks", []))]
-        view = DoHomeworkView(incomplete_hws or cached, self.cog, self.guild_id, self.user_id)
-        embed = discord.Embed(title="📚 Select a Homework", description="Choose an assignment to work on.", color=discord.Color.blue())
+        view           = DoHomeworkView(incomplete_hws or cached, self.cog, self.guild_id, self.user_id)
+        embed          = discord.Embed(
+            title="📚 Select a Homework",
+            description="Choose an assignment to work on.",
+            color=discord.Color.blue(),
+        )
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
     @ui.button(label="✖ Cancel", style=ButtonStyle.danger, row=1)
@@ -553,12 +740,17 @@ class DoTaskView(ui.View):
 # SHARED JOB EXECUTOR
 # ============================================================
 async def _execute_jobs(
-    followup: discord.webhook.async_.AsyncWebhookAdapter | Any,
+    followup: Any,
     jobs: list[tuple[dict, dict]],
     cog: "BotCommands",
     guild_id: int,
 ) -> None:
-    """Run (homework, task) jobs concurrently and post a result embed via followup."""
+    """
+    Run (homework, task) jobs concurrently and post a result embed via followup.
+
+    Uses an asyncio Semaphore to cap concurrency at the guild's setting,
+    mirroring the JS asyncPool(funcs, 5) pattern.
+    """
     client = await cog._get_api_client(guild_id)
     if not client:
         try:
@@ -567,16 +759,17 @@ async def _execute_jobs(
             pass
         return
 
-    settings = config.get_guild_settings(guild_id)
+    settings    = config.get_guild_settings(guild_id)
     concurrency = max(1, min(settings["concurrency"], 8))
     max_retries = settings["retry_attempts"] if settings["auto_retry"] else 0
-    sem = asyncio.Semaphore(concurrency)
+    sem         = asyncio.Semaphore(concurrency)
 
     async def run_one(hw: dict, t_obj: dict) -> tuple[str, str, bool, str]:
         hw_name   = hw.get("name", "Unnamed")
         task_name = t_obj.get("translation", "Unknown")
         game_link = t_obj.get("gameLink", "")
         to_lang   = hw.get("languageCode", "")
+
         async with sem:
             attempt = 0
             while True:
@@ -584,15 +777,19 @@ async def _execute_jobs(
                 try:
                     data = await client.fetch_task_data(t_obj, game_link, to_lang)
                     if not data:
-                        return hw_name, task_name, False, "No data for task"
+                        return hw_name, task_name, False, "No data returned for task"
+
                     result = await client.submit_score(t_obj, data, hw)
+
                     if result.get("error"):
                         body = result.get("body", str(result))
                         if attempt <= max_retries:
                             await asyncio.sleep(1.5 * attempt)
                             continue
                         return hw_name, task_name, False, str(body)[:120]
+
                     return hw_name, task_name, True, ""
+
                 except Exception as e:
                     logger.exception("Task automation failed")
                     if attempt <= max_retries:
@@ -619,15 +816,17 @@ async def _execute_jobs(
         embed.add_field(name=f"❌ Failed ({len(bad)})", value="\n".join(lines), inline=False)
     embed.set_footer(text="Cache refreshed — use /homework to see updated progress.")
 
-    # Invalidate cache
+    # Invalidate homework cache so next /homework shows fresh data
     cog._hw_cache.pop(guild_id, None)
 
     try:
         await followup.send(embed=embed, ephemeral=True)
     except Exception as e:
-        logger.error(f"Failed to send result embed: {e}")
+        logger.error("Failed to send result embed: %s", e)
         try:
-            await followup.send(content=f"✅ {len(ok)}/{len(results)} tasks done.", ephemeral=True)
+            await followup.send(
+                content=f"✅ {len(ok)}/{len(results)} tasks done.", ephemeral=True
+            )
         except Exception:
             pass
 
@@ -639,7 +838,7 @@ class BotCommands(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._hw_cache: dict[int, tuple[float, list[dict]]] = {}
-        self._locks: dict[int, asyncio.Lock] = {}
+        self._locks:    dict[int, asyncio.Lock]             = {}
 
     def _get_lock(self, guild_id: int) -> asyncio.Lock:
         if guild_id not in self._locks:
@@ -652,12 +851,12 @@ class BotCommands(commands.Cog):
             return None
 
         settings = config.get_guild_settings(guild_id)
-        stealth = StealthManager(
-            speed=settings["speed"],
-            min_accuracy=settings["min_accuracy"],
-            max_accuracy=settings["max_accuracy"],
-            fake_time_enabled=settings["fake_time_enabled"],
-            fake_time_exponent=settings["fake_time_exponent"],
+        stealth  = StealthManager(
+            speed               = settings["speed"],
+            min_accuracy        = settings["min_accuracy"],
+            max_accuracy        = settings["max_accuracy"],
+            fake_time_enabled   = settings["fake_time_enabled"],
+            fake_time_exponent  = settings["fake_time_exponent"],
         )
         client = LNApiClient(self.bot.aiohttp_session, stealth)
         fernet = self.bot.fernet
@@ -672,17 +871,19 @@ class BotCommands(commands.Cog):
             if token:
                 client.token = token
                 try:
-                    test = await client.call_lnut("assignmentController/getViewableAll", {"token": token})
+                    test = await client.call_lnut(
+                        "assignmentController/getViewableAll", {"token": token}
+                    )
                     if not test.get("error"):
                         return client
                 except Exception:
                     logger.exception("Token validation failed")
 
             if not username or not password:
-                logger.warning(f"No stored credentials for guild {guild_id}")
+                logger.warning("No stored credentials for guild %s", guild_id)
                 return None
 
-            logger.info(f"Re-logging in for guild {guild_id}")
+            logger.info("Re-logging in for guild %s", guild_id)
             new_token = await client.login(username, password)
             if new_token:
                 config.update_token(guild_id, new_token)
@@ -690,8 +891,14 @@ class BotCommands(commands.Cog):
                 return client
             return None
 
-    async def _get_homeworks_cached(self, guild_id: int, client: LNApiClient, *, force: bool = False) -> list[dict]:
-        now = time.monotonic()
+    async def _get_homeworks_cached(
+        self,
+        guild_id: int,
+        client: LNApiClient,
+        *,
+        force: bool = False,
+    ) -> list[dict]:
+        now    = time.monotonic()
         cached = self._hw_cache.get(guild_id)
         if not force and cached and (now - cached[0]) < HOMEWORK_CACHE_TTL:
             return cached[1]
@@ -715,23 +922,31 @@ class BotCommands(commands.Cog):
             await interaction.followup.send("❌ Must be used in a guild.", ephemeral=True)
             return
         settings = config.get_guild_settings(interaction.guild_id)
-        stealth = StealthManager(
-            speed=settings["speed"],
-            min_accuracy=settings["min_accuracy"],
-            max_accuracy=settings["max_accuracy"],
-            fake_time_enabled=settings["fake_time_enabled"],
-            fake_time_exponent=settings["fake_time_exponent"],
+        stealth  = StealthManager(
+            speed               = settings["speed"],
+            min_accuracy        = settings["min_accuracy"],
+            max_accuracy        = settings["max_accuracy"],
+            fake_time_enabled   = settings["fake_time_enabled"],
+            fake_time_exponent  = settings["fake_time_exponent"],
         )
         client = LNApiClient(self.bot.aiohttp_session, stealth)
-        token = await client.login(username, password)
+        token  = await client.login(username, password)
         if not token:
             await interaction.followup.send("❌ Login failed. Check your username and password.", ephemeral=True)
             return
         fernet = self.bot.fernet
-        config.set_account(interaction.guild_id, encrypt_value(fernet, username), encrypt_value(fernet, password), token)
+        config.set_account(
+            interaction.guild_id,
+            encrypt_value(fernet, username),
+            encrypt_value(fernet, password),
+            token,
+        )
         self._hw_cache.pop(interaction.guild_id, None)
-        logger.info(f"User logged in for guild {interaction.guild_id}")
-        await interaction.followup.send("✅ Login successful! Credentials stored securely.\nUse `/homework` to view assignments.", ephemeral=True)
+        logger.info("User logged in for guild %s", interaction.guild_id)
+        await interaction.followup.send(
+            "✅ Login successful! Credentials stored securely.\nUse `/homework` to view assignments.",
+            ephemeral=True,
+        )
 
     @app_commands.command(name="logout", description="Remove stored LanguageNut credentials")
     async def logout(self, interaction: Interaction):
@@ -760,7 +975,7 @@ class BotCommands(commands.Cog):
             return
         homeworks = await self._get_homeworks_cached(interaction.guild_id, client, force=True)
         if not homeworks:
-            await interaction.followup.send("📭 No homework found.", ephemeral=True)
+            await interaction.followup.send("🔭 No homework found.", ephemeral=True)
             return
         view = HomeworkPaginator(homeworks, interaction.user.id)
         await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
@@ -780,15 +995,22 @@ class BotCommands(commands.Cog):
             return
         homeworks = await self._get_homeworks_cached(interaction.guild_id, client, force=True)
         if not homeworks:
-            await interaction.followup.send("📭 No homework found.", ephemeral=True)
+            await interaction.followup.send("🔭 No homework found.", ephemeral=True)
             return
 
-        incomplete_hws = [hw for hw in homeworks if any(not _is_done(t) for t in hw.get("tasks", []))]
+        incomplete_hws = [
+            hw for hw in homeworks
+            if any(not _is_done(t) for t in hw.get("tasks", []))
+        ]
         if not incomplete_hws:
-            await interaction.followup.send("✅ All homework is already at 100%! Nothing left to do.", ephemeral=True)
+            await interaction.followup.send(
+                "✅ All homework is already at 100%! Nothing left to do.", ephemeral=True
+            )
             return
 
-        total_incomplete = sum(1 for hw in incomplete_hws for t in hw.get("tasks", []) if not _is_done(t))
+        total_incomplete = sum(
+            1 for hw in incomplete_hws for t in hw.get("tasks", []) if not _is_done(t)
+        )
         embed = discord.Embed(
             title="📚 Select Homework to Complete",
             description=(
@@ -818,12 +1040,16 @@ class BotCommands(commands.Cog):
     # =========================================================
     @app_commands.command(name="status", description="Show bot status")
     async def status_cmd(self, interaction: Interaction):
-        embed = discord.Embed(title="🤖 Bot Status", color=discord.Color.green(), timestamp=discord.utils.utcnow())
-        embed.add_field(name="Servers", value=str(len(self.bot.guilds)))
-        embed.add_field(name="Users", value=str(len(self.bot.users)))
-        embed.add_field(name="Latency", value=f"{round(self.bot.latency * 1000)}ms")
-        embed.add_field(name="Python", value=platform.python_version())
-        embed.add_field(name="Discord.py", value=discord.__version__)
+        embed = discord.Embed(
+            title="🤖 Bot Status",
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Servers",     value=str(len(self.bot.guilds)))
+        embed.add_field(name="Users",       value=str(len(self.bot.users)))
+        embed.add_field(name="Latency",     value=f"{round(self.bot.latency * 1000)}ms")
+        embed.add_field(name="Python",      value=platform.python_version())
+        embed.add_field(name="Discord.py",  value=discord.__version__)
         if interaction.guild_id is not None:
             acct = config.get_account(interaction.guild_id)
             embed.add_field(name="Logged in", value="✅" if acct else "❌", inline=True)
@@ -854,7 +1080,10 @@ class BotCommands(commands.Cog):
             if interaction.guild:
                 synced_guild = await self.bot.tree.sync(guild=interaction.guild)
             synced_global = await self.bot.tree.sync()
-            await interaction.followup.send(f"✅ Synced {len(synced_guild)} guild + {len(synced_global)} global commands", ephemeral=True)
+            await interaction.followup.send(
+                f"✅ Synced {len(synced_guild)} guild + {len(synced_global)} global commands",
+                ephemeral=True,
+            )
         except Exception as e:
             await interaction.followup.send(f"❌ Sync failed: {e}", ephemeral=True)
 
@@ -863,12 +1092,16 @@ class BotCommands(commands.Cog):
     async def update_cmd(self, interaction: Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
-            result = subprocess.run(["git", "pull"], capture_output=True, text=True, timeout=30)
+            result = subprocess.run(
+                ["git", "pull"], capture_output=True, text=True, timeout=30
+            )
         except subprocess.TimeoutExpired:
             await interaction.followup.send("❌ git pull timed out", ephemeral=True)
             return
         output = (result.stdout or "") + (result.stderr or "")
-        await interaction.followup.send(f"```{output[:1800] or '(no output)'}```", ephemeral=True)
+        await interaction.followup.send(
+            f"```{output[:1800] or '(no output)'}```", ephemeral=True
+        )
         if result.returncode != 0:
             return
         await asyncio.sleep(2)
@@ -895,13 +1128,13 @@ class BotCommands(commands.Cog):
     @owner_only()
     async def logs_cmd(self, interaction: Interaction):
         log_paths = ["logs/bot.log", "bot.log"]
-        log_file = next((p for p in log_paths if os.path.exists(p)), None)
+        log_file  = next((p for p in log_paths if os.path.exists(p)), None)
         if not log_file:
             await safe_send(interaction, "❌ No log file found.")
             return
         try:
             with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()[-20:]
+                lines   = f.readlines()[-20:]
             content = "".join(lines)
             if len(content) > 1800:
                 content = content[-1800:]
@@ -915,7 +1148,7 @@ class BotCommands(commands.Cog):
     async def reload_cmd(self, interaction: Interaction, cog: str):
         await interaction.response.defer(ephemeral=True)
         candidates = [cog, f"commands.{cog}"] if "." not in cog else [cog]
-        last_err = None
+        last_err   = None
         for name in candidates:
             try:
                 await self.bot.reload_extension(name)
@@ -930,9 +1163,12 @@ class BotCommands(commands.Cog):
     @app_commands.describe(code="Python expression or statements")
     async def eval_cmd(self, interaction: Interaction, code: str):
         await interaction.response.defer(ephemeral=True)
-        env: dict[str, Any] = {"bot": self.bot, "discord": discord, "interaction": interaction, "asyncio": asyncio}
+        env: dict[str, Any] = {
+            "bot": self.bot, "discord": discord,
+            "interaction": interaction, "asyncio": asyncio,
+        }
         try:
-            body = "\n".join(f"    {line}" for line in code.split("\n"))
+            body   = "\n".join(f"    {line}" for line in code.split("\n"))
             exec(f"async def __ex():\n{body}", env)
             result = await env["__ex"]()
             await interaction.followup.send(f"```\n{str(result)[:1900]}\n```", ephemeral=True)

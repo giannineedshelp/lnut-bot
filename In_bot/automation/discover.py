@@ -11,14 +11,31 @@ import logging
 logger = logging.getLogger("lnut_bot.discover")
 
 
+def _pct(task: dict) -> int:
+    """Safely extract completion percentage from a task as an int (0-100)."""
+    gr = task.get("gameResults")
+    if not gr:
+        return 0
+    raw = gr.get("percentage", 0)
+    try:
+        return int(float(raw))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _is_done(task: dict) -> bool:
+    """A task is done when its completion percentage is >= 100."""
+    return _pct(task) >= 100
+
+
 class HomeworkDiscoverer:
     """Discover and resolve homework/task structure."""
 
     TASK_PATTERNS = {
         "sentence": "sentenceCatalog",
-        "verb": "verbUid",
-        "phonic": "phonicCatalogUid",
-        "exam": "examUid",
+        "verb":     "verbUid",
+        "phonic":   "phonicCatalogUid",
+        "exam":     "examUid",
     }
 
     def __init__(self, api_client):
@@ -40,8 +57,8 @@ class HomeworkDiscoverer:
             "assignmentController/getViewableAll", {"token": token}
         )
         homeworks = data.get("homework", []) or []
-        homeworks.reverse()  # newest first
-        logger.info(f"Fetched {len(homeworks)} homeworks")
+        homeworks.reverse()  # newest first (mirrors JS .reverse())
+        logger.info("Fetched %d homeworks", len(homeworks))
         return homeworks
 
     async def get_tasks_by_ids(
@@ -50,30 +67,37 @@ class HomeworkDiscoverer:
         homeworks = await self.get_all_homeworks(token)
         target = next((h for h in homeworks if h.get("id") == homework_id), None)
         if not target:
-            logger.warning(f"Homework {homework_id} not found")
+            logger.warning("Homework %s not found", homework_id)
             return []
-        tasks = target.get("tasks", [])
+        tasks   = target.get("tasks", [])
         matched = [t for t in tasks if t.get("gameUid") in task_ids]
         logger.info(
-            f"Found {len(matched)}/{len(task_ids)} tasks in hw {homework_id}"
+            "Found %d/%d tasks in hw %s", len(matched), len(task_ids), homework_id
         )
         return matched
 
     async def get_incomplete_tasks(self, token: str) -> list[tuple[dict, dict]]:
+        """
+        Return all (homework, task) pairs where the task is not yet at 100%.
+
+        Fix: previously checked percentage == 0, which missed partially-done tasks.
+        Now correctly uses _is_done() which checks >= 100, matching commands.py.
+        """
         homeworks = await self.get_all_homeworks(token)
         incomplete: list[tuple[dict, dict]] = []
         for hw in homeworks:
             for task in hw.get("tasks", []):
-                gr = task.get("gameResults") or {}
-                if not gr or gr.get("percentage", 0) == 0:
+                if not _is_done(task):
                     incomplete.append((hw, task))
         logger.info(
-            f"Found {len(incomplete)} incomplete tasks across "
-            f"{len(homeworks)} homeworks"
+            "Found %d incomplete tasks across %d homeworks",
+            len(incomplete),
+            len(homeworks),
         )
         return incomplete
 
     async def _load_translations(self) -> None:
+        """Load module and display translations from the API."""
         data = await self.api.call_lnut(
             "translationController/getUserModuleTranslations",
             {"token": self.api.token},
@@ -86,25 +110,43 @@ class HomeworkDiscoverer:
         self.display_translations = data2.get("translations", {}) or {}
 
     async def get_task_name(self, task: dict) -> str:
+        """
+        Resolve a human-readable task name.
+
+        Mirrors JS get_task_name():
+          name = task.verb_name
+          if module_translations: name = module_translations[task.module_translations[0]]
+          if module_translation:  name = module_translations[task.module_translation]
+        Then prepends display_translations[task.translation] if available.
+        """
         name = task.get("verb_name", "Unknown Task")
 
+        # Lazy-load translations if not yet fetched
         if not self.module_translations:
             try:
                 await self._load_translations()
             except Exception as e:
-                logger.warning(f"Could not load module translations: {e}")
+                logger.warning("Could not load module translations: %s", e)
 
+        # module_translations (list) — use first element as key
         mts = task.get("module_translations")
         if mts and self.module_translations:
-            name = self.module_translations.get(mts[0], name)
+            resolved = self.module_translations.get(str(mts[0]))
+            if resolved:
+                name = resolved
 
+        # module_translation (single key)
         mt = task.get("module_translation")
         if mt and self.module_translations:
-            name = self.module_translations.get(mt, name)
+            resolved = self.module_translations.get(str(mt))
+            if resolved:
+                name = resolved
 
+        # Prepend display category name if available
         tr = task.get("translation")
         if tr and self.display_translations:
-            disp = self.display_translations.get(tr)
+            disp = self.display_translations.get(str(tr))
             if disp:
                 return f"{disp} — {name}"
+
         return name
