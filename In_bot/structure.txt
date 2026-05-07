@@ -1,0 +1,26 @@
+ln_bot/
+├── main.py                       # Entry point (loads env, starts bot)
+├── config.py                     # Config & per-guild settings manager
+├── config.json                   # Per-guild accounts + settings (persistent)
+├── requirements.txt              # Pinned dependencies
+├── .env                          # DISCORD_TOKEN, ENCRYPTION_KEY, GUILD_ID, OWNER_ID
+├── logs/
+│   └── bot.log                   # Rotating bot log (5MB, 3 backups)
+├── automation/
+│   ├── __init__.py
+│   ├── api_direct.py             # Async LN API client (login + task endpoints)
+│   ├── discover.py               # Homework discovery and task typing
+│   └── stealth.py                # Human-like timing + accuracy randomizer
+├── commands/
+│   ├── __init__.py
+│   └── commands.py               # UNIFIED commands file:
+│                                 #   User: /login /logout /homework /do
+│                                 #         /settings /status
+│                                 #   Admin (owner): /restart /shutdown /update
+│                                 #                 /sync /clear /logs /reload
+│                                 #                 /eval /online /offline
+└── utils/
+    ├── __init__.py
+    ├── encryption.py             # Fernet encryption for credentials
+    ├── logger.py                 # Rotating color-coded logger
+    └── helper.py                 # Small shared helpers
