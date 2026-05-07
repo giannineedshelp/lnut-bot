@@ -24,6 +24,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "concurrency": 3,
     "auto_retry": True,
     "retry_attempts": 2,
+    # Fake-time: when enabled, timestamp = 10^fake_time_exponent seconds
+    # Mirrors JS slider: speed = 10 ** slider.value
+    "fake_time_enabled": False,
+    "fake_time_exponent": 4.0,   # 10^4 = 10000s (~2.8 hours)
 }
 
 

@@ -146,6 +146,10 @@ class SettingsView(ui.View):
 
     def build_embed(self, guild_id: int) -> discord.Embed:
         s = config.get_guild_settings(guild_id)
+        from automation.stealth import seconds_to_human
+        fake_exp  = s["fake_time_exponent"]
+        fake_secs = 10 ** fake_exp
+        fake_str  = seconds_to_human(fake_secs)
         embed = discord.Embed(
             title="⚙️ LanguageNut Bot Settings",
             description="Configure automation behavior. Changes are saved immediately.",
@@ -156,6 +160,14 @@ class SettingsView(ui.View):
         embed.add_field(name="⚡ Concurrency", value=f"`{s['concurrency']}` parallel tasks", inline=True)
         embed.add_field(name="🛡️ Stealth", value="`ON`" if s["stealth_enabled"] else "`OFF`", inline=True)
         embed.add_field(name="🔁 Auto Retry", value=f"`{'ON' if s['auto_retry'] else 'OFF'}` ({s['retry_attempts']}x)", inline=True)
+        embed.add_field(
+            name="🕰️ Fake Time",
+            value=(
+                f"`{'ON' if s['fake_time_enabled'] else 'OFF'}` "
+                f"— exponent `{fake_exp}` → `{fake_str}`"
+            ),
+            inline=False,
+        )
         embed.set_footer(text="Changes apply immediately to future tasks.")
         return embed
 
@@ -202,7 +214,30 @@ class SettingsView(ui.View):
         config.set_guild_setting(interaction.guild_id, "auto_retry", not s["auto_retry"])
         await interaction.response.edit_message(embed=self.build_embed(interaction.guild_id), view=self)
 
-    @ui.button(label="♻️ Reset Defaults", style=ButtonStyle.danger, row=3)
+    @ui.button(label="🕰️ Fake Time Exp", style=ButtonStyle.primary, row=3)
+    async def fake_time_exp_btn(self, interaction: Interaction, _: ui.Button):
+        s = config.get_guild_settings(interaction.guild_id)
+        await interaction.response.send_modal(
+            SettingModal(
+                "fake_time_exponent",
+                "Fake time exponent (0.0–7.0)  [10^x seconds]",
+                s["fake_time_exponent"],
+                float,
+                lambda v: 0.0 <= v <= 7.0,
+                self,
+            )
+        )
+
+    @ui.button(label="🕰️ Toggle Fake Time", style=ButtonStyle.secondary, row=3)
+    async def fake_time_toggle_btn(self, interaction: Interaction, _: ui.Button):
+        if interaction.guild_id is None:
+            await safe_send(interaction, "❌ Guild only.")
+            return
+        s = config.get_guild_settings(interaction.guild_id)
+        config.set_guild_setting(interaction.guild_id, "fake_time_enabled", not s["fake_time_enabled"])
+        await interaction.response.edit_message(embed=self.build_embed(interaction.guild_id), view=self)
+
+    @ui.button(label="♻️ Reset Defaults", style=ButtonStyle.danger, row=4)
     async def reset_btn(self, interaction: Interaction, _: ui.Button):
         if interaction.guild_id is None:
             await safe_send(interaction, "❌ Guild only.")
@@ -210,7 +245,7 @@ class SettingsView(ui.View):
         config.reset_guild_settings(interaction.guild_id)
         await interaction.response.edit_message(embed=self.build_embed(interaction.guild_id), view=self)
 
-    @ui.button(label="✖ Close", style=ButtonStyle.danger, row=3)
+    @ui.button(label="✖ Close", style=ButtonStyle.danger, row=4)
     async def close_btn(self, interaction: Interaction, _: ui.Button):
         await interaction.response.edit_message(content="Settings closed.", embed=None, view=None)
 
@@ -538,18 +573,19 @@ async def _execute_jobs(
     sem = asyncio.Semaphore(concurrency)
 
     async def run_one(hw: dict, t_obj: dict) -> tuple[str, str, bool, str]:
-        hw_name = hw.get("name", "Unnamed")
+        hw_name   = hw.get("name", "Unnamed")
         task_name = t_obj.get("translation", "Unknown")
         game_link = t_obj.get("gameLink", "")
+        to_lang   = hw.get("languageCode", "")
         async with sem:
             attempt = 0
             while True:
                 attempt += 1
                 try:
-                    data = await client.fetch_task_data(t_obj, game_link)
+                    data = await client.fetch_task_data(t_obj, game_link, to_lang)
                     if not data:
                         return hw_name, task_name, False, "No data for task"
-                    result = await client.submit_score(t_obj, data)
+                    result = await client.submit_score(t_obj, data, hw)
                     if result.get("error"):
                         body = result.get("body", str(result))
                         if attempt <= max_retries:
@@ -620,6 +656,8 @@ class BotCommands(commands.Cog):
             speed=settings["speed"],
             min_accuracy=settings["min_accuracy"],
             max_accuracy=settings["max_accuracy"],
+            fake_time_enabled=settings["fake_time_enabled"],
+            fake_time_exponent=settings["fake_time_exponent"],
         )
         client = LNApiClient(self.bot.aiohttp_session, stealth)
         fernet = self.bot.fernet
@@ -677,7 +715,13 @@ class BotCommands(commands.Cog):
             await interaction.followup.send("❌ Must be used in a guild.", ephemeral=True)
             return
         settings = config.get_guild_settings(interaction.guild_id)
-        stealth = StealthManager(speed=settings["speed"])
+        stealth = StealthManager(
+            speed=settings["speed"],
+            min_accuracy=settings["min_accuracy"],
+            max_accuracy=settings["max_accuracy"],
+            fake_time_enabled=settings["fake_time_enabled"],
+            fake_time_exponent=settings["fake_time_exponent"],
+        )
         client = LNApiClient(self.bot.aiohttp_session, stealth)
         token = await client.login(username, password)
         if not token:
