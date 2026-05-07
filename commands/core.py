@@ -8,16 +8,95 @@ from discord.ext import commands
 log = logging.getLogger("lnut_bot.core")
 
 
+class HomeworkTaskView(discord.ui.View):
+    def __init__(self, cog, api, interaction_user_id: int, homework_groups: list[dict[str, Any]]):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.api = api
+        self.interaction_user_id = interaction_user_id
+        self.homework_groups = homework_groups
+        self.selected_task_ids: list[str] = []
+
+        options = []
+        for group in homework_groups:
+            homework = group["homework"]
+            homework_name = homework.get("name") or homework.get("title") or "Homework"
+            for task in group["tasks"]:
+                task_name = task.get("name") or task.get("title") or task.get("type") or "Task"
+                task_id = cog._task_id(task)
+                options.append(
+                    discord.SelectOption(
+                        label=f"{homework_name[:50]}",
+                        description=f"{task_name[:90]}",
+                        value=task_id,
+                    )
+                )
+
+        if options:
+            self.add_item(HomeworkSelect(self, options[:25]))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.interaction_user_id
+
+    async def run_tasks(self, interaction: discord.Interaction, task_ids: list[str]):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        results = []
+
+        for task_id in task_ids:
+            result = await self.cog._complete_task(interaction, self.api, task_id)
+            results.append(result)
+
+        await interaction.followup.send("\n".join(results), ephemeral=True)
+
+
+class HomeworkSelect(discord.ui.Select):
+    def __init__(self, parent_view, options):
+        super().__init__(
+            placeholder="Select homework tasks to complete",
+            min_values=1,
+            max_values=len(options),
+            options=options,
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        self.parent_view.selected_task_ids = self.values
+        await interaction.response.send_message(
+            f"Selected {len(self.values)} task(s). Press 'Do Selected' to start.",
+            ephemeral=True,
+        )
+
+
+class DoSelectedButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Do Selected", style=discord.ButtonStyle.green)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not self.view.selected_task_ids:
+            await interaction.response.send_message("No tasks selected.", ephemeral=True)
+            return
+        await self.view.run_tasks(interaction, self.view.selected_task_ids)
+
+
+class DoAllButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Do All Remaining", style=discord.ButtonStyle.blurple)
+
+    async def callback(self, interaction: discord.Interaction):
+        task_ids = []
+        for group in self.view.homework_groups:
+            for task in group["tasks"]:
+                task_ids.append(self.view.cog._task_id(task))
+
+        await self.view.run_tasks(interaction, task_ids)
+
+
 class Core(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     def _session(self):
-        session = getattr(self.bot, "aiohttp_session", None) or getattr(
-            self.bot,
-            "session",
-            None,
-        )
+        session = getattr(self.bot, "aiohttp_session", None) or getattr(self.bot, "session", None)
         if session is None or session.closed:
             raise RuntimeError("HTTP session is not ready yet.")
         return session
@@ -29,7 +108,6 @@ class Core(commands.Cog):
     async def _send(self, interaction: discord.Interaction, content: str, **kwargs: Any) -> None:
         if len(content) > 1900:
             content = content[:1890] + "\n... trimmed"
-
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(content, ephemeral=True, **kwargs)
@@ -42,37 +120,27 @@ class Core(commands.Cog):
     def _homework_list(data: Any) -> list[dict[str, Any]]:
         if isinstance(data, list):
             return [item for item in data if isinstance(item, dict)]
-
         if not isinstance(data, dict):
             return []
-
         for key in ("homework", "homeworks", "assignments", "data"):
             value = data.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
-
         if isinstance(data.get("tasks"), list):
             return [data]
-
         return []
 
     @staticmethod
-    def _iter_tasks(homeworks: Iterable[dict[str, Any]]) -> Iterable[tuple[dict[str, Any], dict[str, Any]]]:
-        for homework in homeworks:
-            tasks = homework.get("tasks", [])
-            if not isinstance(tasks, list):
-                continue
+    def _task_progress(task: dict[str, Any]) -> float:
+        for key in ("progress", "completion", "percentComplete", "score"):
+            value = task.get(key)
+            if isinstance(value, (int, float)):
+                return float(value)
+        return 0.0
 
-            for task in tasks:
-                if not isinstance(task, dict):
-                    continue
-
-                merged = dict(task)
-                for key in ("languageCode", "ietf", "toietf", "toLanguage"):
-                    if key not in merged and key in homework:
-                        merged[key] = homework[key]
-
-                yield homework, merged
+    @staticmethod
+    def _task_completed(task: dict[str, Any]) -> bool:
+        return task.get("completed") is True or Core._task_progress(task) >= 100
 
     @staticmethod
     def _task_id(task: dict[str, Any]) -> str:
@@ -80,27 +148,10 @@ class Core(commands.Cog):
             value = task.get(key)
             if value:
                 return str(value)
-
         base = task.get("base")
         if isinstance(base, list) and base:
             return str(base[-1])
-
         return "unknown"
-
-    @classmethod
-    def _task_matches(cls, task: dict[str, Any], task_id: str) -> bool:
-        candidates = {
-            str(task.get(key))
-            for key in ("uid", "catalog_uid", "catalogUid", "game_uid", "gameUid", "rel_module_uid")
-            if task.get(key)
-        }
-
-        base = task.get("base")
-        if isinstance(base, list):
-            candidates.update(str(value) for value in base if value)
-
-        candidates.add(cls._task_id(task))
-        return task_id in candidates
 
     async def _login_api(self, interaction: discord.Interaction):
         from automation.api_direct import LanguageNutAPI
@@ -111,144 +162,109 @@ class Core(commands.Cog):
         if not account:
             await self._send(interaction, "No saved account was found for your Discord user.")
             return None
-
         password = get_decrypted_password(user_id)
         if not password:
             await self._send(interaction, "Saved password could not be decrypted.")
             return None
 
         api = LanguageNutAPI(self._session())
-        ok = await api.login(account["username"], password)
-        if not ok:
+        if not await api.login(account["username"], password):
             await self._send(interaction, "LanguageNut login failed.")
             return None
-
         return api
 
-    @app_commands.command(name="ping", description="Test bot response")
-    async def ping(self, interaction: discord.Interaction):
-        log.info("Received /ping from %s", interaction.user)
-        await self._send(interaction, "Pong. Bot is working.")
+    async def _complete_task(self, interaction, api, task_id: str):
+        from automation.task_handler import TaskCompleter
+        from config import get_user_settings
 
-    @app_commands.command(name="debug", description="Check bot systems")
-    async def debug(self, interaction: discord.Interaction):
-        log.info("Received /debug from %s", interaction.user)
-        await self._defer(interaction)
+        homeworks = self._homework_list(await api.get_homeworks())
+        for homework in homeworks:
+            for task in homework.get("tasks", []):
+                if self._task_id(task) != task_id:
+                    continue
+                if self._task_completed(task):
+                    return f"Skipped completed task {task_id}"
 
-        session = getattr(self.bot, "aiohttp_session", None) or getattr(self.bot, "session", None)
-        status = [
-            f"Bot latency: {round(self.bot.latency * 1000)}ms",
-            f"HTTP session active: {session is not None and not session.closed}",
-            f"Loaded commands: {', '.join(sorted(command.name for command in self.bot.tree.get_commands()))}",
-            f"User: {interaction.user}",
-            "Core loaded: True",
-        ]
+                settings = get_user_settings(str(interaction.user.id))
+                language = task.get("languageCode") or homework.get("languageCode") or "es-ES"
 
-        await self._send(interaction, "```" + "\n".join(status) + "```")
+                completer = TaskCompleter(
+                    token=api.token,
+                    task=task,
+                    ietf=language,
+                    speed_ms=settings["speed"],
+                    accuracy_min=settings["accuracy_min"],
+                    accuracy_max=settings["accuracy_max"],
+                )
+                try:
+                    answers = await completer.get_data()
+                    if not answers:
+                        return f"No answers found for task {task_id}"
+                    result = await completer.send_answers(answers)
+                    score = result.get("score", 0) if isinstance(result, dict) else 0
+                    return f"Completed task {task_id} | Score: {score}"
+                finally:
+                    await completer.close()
+        return f"Task {task_id} not found"
 
-    @app_commands.command(name="homework", description="List available homework tasks")
+    @app_commands.command(name="homework", description="Interactive homework manager")
     async def homework(self, interaction: discord.Interaction):
         log.info("Received /homework from %s", interaction.user)
         await self._defer(interaction)
 
-        try:
-            api = await self._login_api(interaction)
-            if api is None:
-                return
+        api = await self._login_api(interaction)
+        if api is None:
+            return
 
-            homeworks = self._homework_list(await api.get_homeworks())
-            if not homeworks:
-                await self._send(interaction, "No homework was found for this account.")
-                return
+        homeworks = self._homework_list(await api.get_homeworks())
+        homework_groups = []
 
-            lines = [f"Found {len(homeworks)} homework item(s):"]
-            for index, (homework, task) in enumerate(self._iter_tasks(homeworks), start=1):
-                if index > 15:
-                    lines.append("More tasks are available, but only the first 15 are shown.")
-                    break
+        for homework in homeworks:
+            valid_tasks = []
+            for task in homework.get("tasks", []):
+                if not isinstance(task, dict):
+                    continue
+                if self._task_completed(task):
+                    continue
+                valid_tasks.append(task)
 
-                homework_name = homework.get("name") or homework.get("title") or "Homework"
-                task_name = task.get("name") or task.get("title") or task.get("type") or "Task"
-                lines.append(f"{index}. {homework_name} - {task_name} - id: {self._task_id(task)}")
+            if valid_tasks:
+                homework_groups.append({
+                    "homework": homework,
+                    "tasks": valid_tasks,
+                })
 
-            await self._send(interaction, "\n".join(lines))
+        if not homework_groups:
+            await self._send(interaction, "No incomplete homework found.")
+            return
 
-        except Exception as exc:
-            log.exception("/homework failed")
-            await self._send(interaction, f"Homework failed:\n```{exc}```")
+        view = HomeworkTaskView(self, api, interaction.user.id, homework_groups)
+        view.add_item(DoSelectedButton())
+        view.add_item(DoAllButton())
 
-    @app_commands.command(name="do", description="Run a homework task by task id")
-    @app_commands.describe(task_id="Task id shown by /homework")
+        total_tasks = sum(len(group["tasks"]) for group in homework_groups)
+        await interaction.followup.send(
+            f"Found {total_tasks} incomplete task(s). Select tasks below or use Do All Remaining.",
+            view=view,
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="do", description="Run one or multiple homework tasks by task ids")
+    @app_commands.describe(task_id="Single task id or comma-separated ids")
     async def do(self, interaction: discord.Interaction, task_id: str):
         log.info("Received /do from %s", interaction.user)
         await self._defer(interaction)
 
-        completer = None
-        try:
-            from automation.task_handler import TaskCompleter
-            from config import get_user_settings
+        api = await self._login_api(interaction)
+        if api is None:
+            return
 
-            api = await self._login_api(interaction)
-            if api is None:
-                return
+        task_ids = [tid.strip() for tid in task_id.split(",") if tid.strip()]
+        results = []
+        for tid in task_ids:
+            results.append(await self._complete_task(interaction, api, tid))
 
-            homeworks = self._homework_list(await api.get_homeworks())
-            task = None
-            homework = None
-
-            for candidate_homework, candidate_task in self._iter_tasks(homeworks):
-                if self._task_matches(candidate_task, task_id):
-                    homework = candidate_homework
-                    task = candidate_task
-                    break
-
-            if task is None:
-                await self._send(interaction, f"Task id `{task_id}` was not found. Run `/homework` for current task ids.")
-                return
-
-            settings = get_user_settings(str(interaction.user.id))
-            language = (
-                task.get("languageCode")
-                or task.get("ietf")
-                or task.get("toietf")
-                or homework.get("languageCode")
-                or "es-ES"
-            )
-
-            completer = TaskCompleter(
-                token=api.token,
-                task=task,
-                ietf=language,
-                speed_ms=settings["speed"],
-                accuracy_min=settings["accuracy_min"],
-                accuracy_max=settings["accuracy_max"],
-            )
-
-            answers = await completer.get_data()
-            if not answers:
-                await self._send(interaction, "No answer data was found for that task.")
-                return
-
-            result = await completer.send_answers(answers)
-            score = result.get("score", 0) if isinstance(result, dict) else 0
-            await self._send(interaction, f"Done. Score: {score}")
-
-        except Exception as exc:
-            log.exception("/do failed")
-            await self._send(interaction, f"Task failed:\n```{exc}```")
-
-        finally:
-            if completer is not None:
-                try:
-                    await completer.close()
-                except Exception:
-                    log.exception("Failed to close task completer")
-
-    @commands.Cog.listener()
-    async def on_interaction(self, interaction: discord.Interaction):
-        command_name = interaction.data.get("name") if isinstance(interaction.data, dict) else None
-        if command_name:
-            log.info("Interaction received: /%s", command_name)
+        await self._send(interaction, "\n".join(results))
 
 
 async def setup(bot: commands.Bot):
