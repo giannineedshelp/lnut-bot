@@ -56,7 +56,7 @@ if not ENV_PATH:
 
 load_dotenv(ENV_PATH, override=True)
 
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip().strip('"').strip("'")
 print("TOKEN LOADED:", bool(TOKEN))
 
 if not TOKEN:
@@ -97,6 +97,7 @@ class LanguageNutBot(commands.Bot):
         import aiohttp
 
         self.aiohttp_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30),
             headers={
                 "User-Agent": "Mozilla/5.0",
                 "Accept": "application/json",
