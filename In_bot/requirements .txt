@@ -1,7 +1,0 @@
-discord.py==2.4.0
-playwright==1.51.0
-playwright-stealth==1.0.6
-requests==2.32.3
-python-dotenv==1.1.0
-cryptography==44.0.2
-aiofiles==24.1.0
