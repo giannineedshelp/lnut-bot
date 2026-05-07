@@ -1,11 +1,12 @@
 import logging
-from typing import Any, Iterable
+from typing import Any
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 log = logging.getLogger("lnut_bot.core")
+MAX_SELECT_OPTIONS = 25
 
 
 class HomeworkTaskView(discord.ui.View):
@@ -22,18 +23,20 @@ class HomeworkTaskView(discord.ui.View):
             homework = group["homework"]
             homework_name = homework.get("name") or homework.get("title") or "Homework"
             for task in group["tasks"]:
+                if len(options) >= MAX_SELECT_OPTIONS:
+                    break
                 task_name = task.get("name") or task.get("title") or task.get("type") or "Task"
                 task_id = cog._task_id(task)
                 options.append(
                     discord.SelectOption(
-                        label=f"{homework_name[:50]}",
-                        description=f"{task_name[:90]}",
+                        label=homework_name[:100],
+                        description=task_name[:100],
                         value=task_id,
                     )
                 )
 
         if options:
-            self.add_item(HomeworkSelect(self, options[:25]))
+            self.add_item(HomeworkSelect(self, options))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.interaction_user_id
@@ -41,28 +44,25 @@ class HomeworkTaskView(discord.ui.View):
     async def run_tasks(self, interaction: discord.Interaction, task_ids: list[str]):
         await interaction.response.defer(ephemeral=True, thinking=True)
         results = []
-
         for task_id in task_ids:
-            result = await self.cog._complete_task(interaction, self.api, task_id)
-            results.append(result)
-
-        await interaction.followup.send("\n".join(results), ephemeral=True)
+            results.append(await self.cog._complete_task(interaction, self.api, task_id))
+        await interaction.followup.send("\n".join(results)[:1900], ephemeral=True)
 
 
 class HomeworkSelect(discord.ui.Select):
     def __init__(self, parent_view, options):
         super().__init__(
-            placeholder="Select homework tasks to complete",
+            placeholder="Select homework tasks",
             min_values=1,
-            max_values=len(options),
+            max_values=min(len(options), MAX_SELECT_OPTIONS),
             options=options,
         )
         self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction):
-        self.parent_view.selected_task_ids = self.values
+        self.parent_view.selected_task_ids = list(self.values)
         await interaction.response.send_message(
-            f"Selected {len(self.values)} task(s). Press 'Do Selected' to start.",
+            f"Selected {len(self.values)} task(s).",
             ephemeral=True,
         )
 
@@ -87,12 +87,11 @@ class DoAllButton(discord.ui.Button):
         for group in self.view.homework_groups:
             for task in group["tasks"]:
                 task_ids.append(self.view.cog._task_id(task))
-
         await self.view.run_tasks(interaction, task_ids)
 
 
 class Core(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot):
         self.bot = bot
 
     def _session(self):
@@ -101,70 +100,60 @@ class Core(commands.Cog):
             raise RuntimeError("HTTP session is not ready yet.")
         return session
 
-    async def _defer(self, interaction: discord.Interaction) -> None:
+    async def _defer(self, interaction):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=True)
 
-    async def _send(self, interaction: discord.Interaction, content: str, **kwargs: Any) -> None:
-        if len(content) > 1900:
-            content = content[:1890] + "\n... trimmed"
-        try:
-            if interaction.response.is_done():
-                await interaction.followup.send(content, ephemeral=True, **kwargs)
-            else:
-                await interaction.response.send_message(content, ephemeral=True, **kwargs)
-        except discord.HTTPException:
-            log.exception("Failed to send interaction response")
+    async def _send(self, interaction, content: str, **kwargs):
+        content = content[:1900]
+        if interaction.response.is_done():
+            await interaction.followup.send(content, ephemeral=True, **kwargs)
+        else:
+            await interaction.response.send_message(content, ephemeral=True, **kwargs)
 
     @staticmethod
-    def _homework_list(data: Any) -> list[dict[str, Any]]:
+    def _homework_list(data):
         if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
-        if not isinstance(data, dict):
-            return []
-        for key in ("homework", "homeworks", "assignments", "data"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-        if isinstance(data.get("tasks"), list):
-            return [data]
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict):
+            for key in ("homework", "homeworks", "assignments", "data"):
+                if isinstance(data.get(key), list):
+                    return [x for x in data[key] if isinstance(x, dict)]
+            if isinstance(data.get("tasks"), list):
+                return [data]
         return []
 
     @staticmethod
-    def _task_progress(task: dict[str, Any]) -> float:
+    def _task_progress(task):
         for key in ("progress", "completion", "percentComplete", "score"):
             value = task.get(key)
             if isinstance(value, (int, float)):
                 return float(value)
         return 0.0
 
-    @staticmethod
-    def _task_completed(task: dict[str, Any]) -> bool:
-        return task.get("completed") is True or Core._task_progress(task) >= 100
+    @classmethod
+    def _task_completed(cls, task):
+        return task.get("completed") is True or cls._task_progress(task) >= 100
 
     @staticmethod
-    def _task_id(task: dict[str, Any]) -> str:
+    def _task_id(task):
         for key in ("uid", "catalog_uid", "catalogUid", "game_uid", "gameUid", "rel_module_uid"):
-            value = task.get(key)
-            if value:
-                return str(value)
+            if task.get(key):
+                return str(task[key])
         base = task.get("base")
         if isinstance(base, list) and base:
             return str(base[-1])
         return "unknown"
 
-    async def _login_api(self, interaction: discord.Interaction):
+    async def _login_api(self, interaction):
         from automation.api_direct import LanguageNutAPI
         from config import get_account, get_decrypted_password
 
         user_id = str(interaction.user.id)
         account = get_account(user_id)
-        if not account:
-            await self._send(interaction, "No saved account was found for your Discord user.")
-            return None
         password = get_decrypted_password(user_id)
-        if not password:
-            await self._send(interaction, "Saved password could not be decrypted.")
+        if not account or not password:
+            await self._send(interaction, "Saved account details missing.")
             return None
 
         api = LanguageNutAPI(self._session())
@@ -173,25 +162,22 @@ class Core(commands.Cog):
             return None
         return api
 
-    async def _complete_task(self, interaction, api, task_id: str):
+    async def _complete_task(self, interaction, api, task_id):
         from automation.task_handler import TaskCompleter
         from config import get_user_settings
 
-        homeworks = self._homework_list(await api.get_homeworks())
-        for homework in homeworks:
+        for homework in self._homework_list(await api.get_homeworks()):
             for task in homework.get("tasks", []):
                 if self._task_id(task) != task_id:
                     continue
                 if self._task_completed(task):
-                    return f"Skipped completed task {task_id}"
+                    return f"Skipped {task_id} (completed)"
 
                 settings = get_user_settings(str(interaction.user.id))
-                language = task.get("languageCode") or homework.get("languageCode") or "es-ES"
-
                 completer = TaskCompleter(
                     token=api.token,
                     task=task,
-                    ietf=language,
+                    ietf=task.get("languageCode") or homework.get("languageCode") or "es-ES",
                     speed_ms=settings["speed"],
                     accuracy_min=settings["accuracy_min"],
                     accuracy_max=settings["accuracy_max"],
@@ -199,40 +185,27 @@ class Core(commands.Cog):
                 try:
                     answers = await completer.get_data()
                     if not answers:
-                        return f"No answers found for task {task_id}"
+                        return f"No answers for {task_id}"
                     result = await completer.send_answers(answers)
-                    score = result.get("score", 0) if isinstance(result, dict) else 0
-                    return f"Completed task {task_id} | Score: {score}"
+                    return f"Done {task_id} | Score: {result.get('score', 0) if isinstance(result, dict) else 0}"
                 finally:
                     await completer.close()
         return f"Task {task_id} not found"
 
     @app_commands.command(name="homework", description="Interactive homework manager")
-    async def homework(self, interaction: discord.Interaction):
-        log.info("Received /homework from %s", interaction.user)
+    async def homework(self, interaction):
         await self._defer(interaction)
-
         api = await self._login_api(interaction)
-        if api is None:
+        if not api:
             return
 
-        homeworks = self._homework_list(await api.get_homeworks())
         homework_groups = []
-
-        for homework in homeworks:
-            valid_tasks = []
-            for task in homework.get("tasks", []):
-                if not isinstance(task, dict):
-                    continue
-                if self._task_completed(task):
-                    continue
-                valid_tasks.append(task)
-
-            if valid_tasks:
-                homework_groups.append({
-                    "homework": homework,
-                    "tasks": valid_tasks,
-                })
+        total_tasks = 0
+        for homework in self._homework_list(await api.get_homeworks()):
+            tasks = [t for t in homework.get("tasks", []) if isinstance(t, dict) and not self._task_completed(t)]
+            if tasks:
+                homework_groups.append({"homework": homework, "tasks": tasks})
+                total_tasks += len(tasks)
 
         if not homework_groups:
             await self._send(interaction, "No incomplete homework found.")
@@ -242,32 +215,27 @@ class Core(commands.Cog):
         view.add_item(DoSelectedButton())
         view.add_item(DoAllButton())
 
-        total_tasks = sum(len(group["tasks"]) for group in homework_groups)
+        extra = ""
+        if total_tasks > MAX_SELECT_OPTIONS:
+            extra = f" Showing first {MAX_SELECT_OPTIONS} in selector. Use /do for others."
+
         await interaction.followup.send(
-            f"Found {total_tasks} incomplete task(s). Select tasks below or use Do All Remaining.",
+            f"Found {total_tasks} incomplete task(s).{extra}",
             view=view,
             ephemeral=True,
         )
 
-    @app_commands.command(name="do", description="Run one or multiple homework tasks by task ids")
-    @app_commands.describe(task_id="Single task id or comma-separated ids")
-    async def do(self, interaction: discord.Interaction, task_id: str):
-        log.info("Received /do from %s", interaction.user)
+    @app_commands.command(name="do", description="Run one or multiple homework tasks")
+    async def do(self, interaction, task_id: str):
         await self._defer(interaction)
-
         api = await self._login_api(interaction)
-        if api is None:
+        if not api:
             return
-
-        task_ids = [tid.strip() for tid in task_id.split(",") if tid.strip()]
         results = []
-        for tid in task_ids:
+        for tid in [x.strip() for x in task_id.split(",") if x.strip()]:
             results.append(await self._complete_task(interaction, api, tid))
-
         await self._send(interaction, "\n".join(results))
 
 
-async def setup(bot: commands.Bot):
-    log.info("Loading Core cog")
+async def setup(bot):
     await bot.add_cog(Core(bot))
-    log.info("Core cog loaded")
