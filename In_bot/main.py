@@ -52,11 +52,8 @@ from utils.encryption import get_fernet
 
 logger = setup_logging()
 
-GUILD_ID_RAW = os.getenv("GUILD_ID", "").strip()
-try:
-    GUILD_ID: Optional[int] = int(GUILD_ID_RAW) if GUILD_ID_RAW else None
-except ValueError:
-    GUILD_ID = None
+raw_guild_id = os.getenv("GUILD_ID", "").strip()
+GUILD_ID: Optional[int] = int(raw_guild_id) if raw_guild_id else None
 
 
 # =========================
