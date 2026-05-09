@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Optional
+import aiohttp
 
 import discord
 from discord import ButtonStyle, Interaction, app_commands, ui
@@ -36,6 +37,11 @@ OWNER_ID = 1453752725324955656
 
 # Cache TTL (seconds)
 HOMEWORK_CACHE_TTL = 20.0
+
+# Autocomplete cache (shared across guilds)
+AC_CACHE: dict[int, list[dict]] = {}  # guild_id -> homeworks
+AC_CACHE_TTL = 30.0  # seconds
+AC_CACHE_TIME: dict[int, float] = {}  # guild_id -> fetch timestamp
 
 
 # ============================================================
@@ -272,7 +278,7 @@ class SettingsView(ui.View):
     async def fake_time_exp_btn(self, interaction: Interaction, _: ui.Button):
         s = config.get_guild_settings(interaction.guild_id)
         exp = s["fake_time_exponent"]
-        current_display = f"{exp}  (= {seconds_to_human(10 ** exp)})"
+        current_display = str(round(exp, 2))
         await interaction.response.send_modal(
             SettingModal(
                 "fake_time_exponent",
@@ -777,6 +783,9 @@ async def _execute_jobs(
                 try:
                     data = await client.fetch_task_data(t_obj, game_link, to_lang)
                     if not data:
+                        if attempt <= max_retries:
+                            await asyncio.sleep(1.5 * attempt)
+                            continue
                         return hw_name, task_name, False, "No data returned for task"
 
                     result = await client.submit_score(t_obj, data, hw)
@@ -909,9 +918,35 @@ class BotCommands(commands.Cog):
             logger.exception("Homework fetch failed")
             return cached[1] if cached else []
         self._hw_cache[guild_id] = (now, homeworks)
+        # Also populate autocomplete cache
+        AC_CACHE[guild_id] = homeworks
+        AC_CACHE_TIME[guild_id] = now
         return homeworks
 
     # =========================================================
+
+    async def _get_autocomplete_data(self, guild_id: int) -> list[dict]:
+        """Return cached homework list for autocomplete, refreshing if stale."""
+        now = time.monotonic()
+        cached_time = AC_CACHE_TIME.get(guild_id, 0)
+        cached_data = AC_CACHE.get(guild_id)
+        if cached_data and (now - cached_time) < AC_CACHE_TTL:
+            return cached_data
+        acct = config.get_account(guild_id)
+        if not acct:
+            return cached_data or []
+        client = await self._get_api_client(guild_id)
+        if not client:
+            return cached_data or []
+        discoverer = HomeworkDiscoverer(client)
+        try:
+            homeworks = await discoverer.get_all_homeworks(client.token)
+            AC_CACHE[guild_id] = homeworks
+            AC_CACHE_TIME[guild_id] = now
+            return homeworks
+        except Exception:
+            logger.exception("Autocomplete homework fetch failed")
+            return cached_data or []
     # LOGIN / LOGOUT
     # =========================================================
     @app_commands.command(name="login", description="Log in to LanguageNut and securely store credentials")
@@ -984,6 +1019,60 @@ class BotCommands(commands.Cog):
     # DO TASK(S) — dropdown UI
     # =========================================================
     @app_commands.command(name="do", description="Complete homework tasks using an interactive selector")
+
+    # =========================================================
+    # QUICK DO - autocomplete parameter
+    # =========================================================
+    @app_commands.command(name="quick-do", description="Quick-complete a task by homework:index (faster than /do dropdowns)")
+    @app_commands.describe(task="Format: hwId:idx (e.g. 123:0) or comma-separated: 123:0,456:2")
+    @app_commands.autocomplete(task=task_autocomplete)
+    async def quick_do(self, interaction: Interaction, task: str):
+        """Quick-complete one or more tasks using hwId:idx syntax."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not interaction.guild_id:
+            await interaction.followup.send("Must be used in a guild.", ephemeral=True)
+            return
+        client = await self._get_api_client(interaction.guild_id)
+        if not client:
+            await interaction.followup.send("Not logged in. Use /login first.", ephemeral=True)
+            return
+        homeworks = await self._get_homeworks_cached(interaction.guild_id, client, force=True)
+        if not homeworks:
+            await interaction.followup.send("No homework found.", ephemeral=True)
+            return
+        # Parse task format: hwId:idx or comma-separated
+        jobs: list[tuple[dict, dict]] = []
+        parts = [p.strip() for p in task.split(",")]
+        for part in parts:
+            if ":" not in part:
+                await interaction.followup.send("Invalid format: use hwId:idx", ephemeral=True)
+                return
+            hw_id_str, idx_str = part.split(":", 1)
+            try:
+                hw_id = int(hw_id_str); idx = int(idx_str)
+            except ValueError:
+                await interaction.followup.send("Invalid number in: " + repr(part), ephemeral=True)
+                return
+            hw = next((h for h in homeworks if h.get("id") == hw_id), None)
+            if not hw:
+                await interaction.followup.send("Homework #" + str(hw_id) + " not found.", ephemeral=True)
+                return
+            task_list = hw.get("tasks", [])
+            if idx < 0 or idx >= len(task_list):
+                await interaction.followup.send("Task index " + str(idx) + " out of range.", ephemeral=True)
+                return
+            task_obj = task_list[idx]
+            if _is_done(task_obj):
+                await interaction.followup.send("Task #" + str(hw_id) + ":" + str(idx) + " already done.", ephemeral=True)
+                return
+            jobs.append((hw, task_obj))
+        if not jobs:
+            await interaction.followup.send("No valid tasks to complete.", ephemeral=True)
+            return
+        await interaction.followup.send("Starting **" + str(len(jobs)) + "** task(s)...", ephemeral=True)
+        asyncio.create_task(
+            _execute_jobs(interaction.followup, jobs, self, interaction.guild_id)
+        )
     async def do_task(self, interaction: Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         if interaction.guild_id is None:
@@ -1167,6 +1256,9 @@ class BotCommands(commands.Cog):
             "bot": self.bot, "discord": discord,
             "interaction": interaction, "asyncio": asyncio,
         }
+        if not code.strip():
+            await interaction.followup.send("Empty code.", ephemeral=True)
+            return
         try:
             body   = "\n".join(f"    {line}" for line in code.split("\n"))
             exec(f"async def __ex():\n{body}", env)
@@ -1186,5 +1278,46 @@ class BotCommands(commands.Cog):
         await interaction.response.send_message("@everyone BOT IS OFFLINE 🔴")
 
 
+
+# ============================================================
+# AUTOCOMPLETE
+# ============================================================
+async def task_autocomplete(
+    interaction: Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    """Autocomplete for /quick-do parameter."""
+    if not interaction.guild_id:
+        return []
+    cog = interaction.client.get_cog("BotCommands")
+    if not cog:
+        return []
+    try:
+        homeworks = await cog._get_autocomplete_data(interaction.guild_id)
+    except Exception:
+        logger.exception("Autocomplete failed")
+        return []
+    choices: list[app_commands.Choice[str]] = []
+    current_lower = current.lower() if current else ""
+    for hw in homeworks:
+        hw_id = hw.get("id", "")
+        hw_name = hw.get("name", "Unnamed") or "?"
+        for idx, task in enumerate(hw.get("tasks", [])):
+            if len(choices) >= 25:
+                break
+            if task.get("percentage", 0) >= 100:
+                continue
+            task_name = task.get("translation", "Unknown") or "?"
+            value = str(hw_id) + ":" + str(idx)
+            label = (str(hw_name)[:20] + " - " + str(task_name)[:30])[:75]
+            if current_lower:
+                if current_lower in value.lower() or current_lower in label.lower():
+                    choices.append(app_commands.Choice(name=label, value=value))
+            else:
+                if len(choices) < 25:
+                    choices.append(app_commands.Choice(name=label, value=value))
+        if len(choices) >= 25:
+            break
+    return choices[:25]
 async def setup(bot: commands.Bot):
     await bot.add_cog(BotCommands(bot))

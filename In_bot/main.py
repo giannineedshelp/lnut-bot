@@ -98,6 +98,9 @@ class LanguageNutBot(commands.Bot):
         try:
             if GUILD_ID:
                 guild_obj = discord.Object(id=GUILD_ID)
+                # App commands in this cog are declared globally, so copy them into
+                # the dev guild before a guild-scoped sync.
+                self.tree.copy_global_to(guild=guild_obj)
                 synced = await self.tree.sync(guild=guild_obj)
                 logger.info(f"Synced {len(synced)} commands to guild {GUILD_ID}")
             else:
@@ -152,8 +155,7 @@ class LanguageNutBot(commands.Bot):
 # =========================
 async def main():
     bot = LanguageNutBot()
-    async with bot:
-        await bot.start(TOKEN)
+    await bot.start(TOKEN)
 
 
 if __name__ == "__main__":
