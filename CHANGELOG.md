@@ -1,5 +1,18 @@
 # LanguageNut Bot — Changelog
 
+## v2.0.1 — Hotfix: critical runtime errors + Windows compat
+
+### Fixed
+- **`task_autocomplete` NameError** — moved autocomplete function definition before `BotCommands` class so the decorator `@app_commands.autocomplete(task=task_autocomplete)` resolves at class-creation time (was crashing on module import)
+- **`/do` command not registered** — orphaned decorator at line 1076 had no function body; connected it to the undecorated `do_task` method so `/do` actually works
+- **`os.execv` crash on Windows** — `os.execv` is Unix-only; replaced with `subprocess.Popen` + `os._exit(0)` for Windows-compatible restart
+- **Dead code after `raise`** — removed unreachable `await bot.start(TOKEN)` in `main.py` that followed a `raise` statement
+- **Missing `.env` vars** — added `GUILD_ID` and `OWNER_ID` to inner `.env` (were only in `.env.example`)
+
+### Improvements
+- All Python files pass `py_compile` and import without errors
+- Cleaner separation: `task_autocomplete` is now a module-level function alongside other helpers
+
 ## v2.0.0 — Major rewrite (fixes + optimization)
 
 ### Fixes
@@ -30,3 +43,4 @@
 - Fixed /homework embed crashing (Discord 25 field limit)
 - Removed duplicate embed field logic
 - Fixed indentation errors breaking command execution
+

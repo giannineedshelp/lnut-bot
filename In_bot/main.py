@@ -155,7 +155,13 @@ class LanguageNutBot(commands.Bot):
 # =========================
 async def main():
     bot = LanguageNutBot()
-    await bot.start(TOKEN)
+    try:
+        await bot.start(TOKEN)
+    except Exception as e:
+        logger.exception(f"Exception during bot startup: {e}")
+        raise
+    finally:
+        await bot.close()
 
 
 if __name__ == "__main__":

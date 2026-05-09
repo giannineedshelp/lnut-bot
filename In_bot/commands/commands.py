@@ -871,6 +871,48 @@ async def _execute_jobs(
             pass
 
 
+
+
+async def task_autocomplete(
+    interaction: Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    """Autocomplete for /quick-do parameter."""
+    if not interaction.guild_id:
+        return []
+    cog = interaction.client.get_cog("BotCommands")
+    if not cog:
+        return []
+    try:
+        homeworks = await cog._get_autocomplete_data(interaction.guild_id)
+    except Exception:
+        logger.exception("Autocomplete failed")
+        return []
+    choices: list[app_commands.Choice[str]] = []
+    current_lower = current.lower() if current else ""
+    for hw in homeworks:
+        hw_id = hw.get("id", "")
+        hw_name = hw.get("name", "Unnamed") or "?"
+        for idx, task in enumerate(hw.get("tasks", [])):
+            if len(choices) >= 25:
+                break
+            if task.get("percentage", 0) >= 100:
+                continue
+            task_name = task.get("translation", "Unknown") or "?"
+            value = str(hw_id) + ":" + str(idx)
+            label = (str(hw_name)[:20] + " - " + str(task_name)[:30])[:75]
+            if current_lower:
+                if current_lower in value.lower() or current_lower in label.lower():
+                    choices.append(app_commands.Choice(name=label, value=value))
+            else:
+                if len(choices) < 25:
+                    choices.append(app_commands.Choice(name=label, value=value))
+        if len(choices) >= 25:
+            break
+    return choices[:25]
+async def setup(bot: commands.Bot):
+    await bot.add_cog(BotCommands(bot))
+
 # ============================================================
 # MAIN COG
 # ============================================================
@@ -1073,8 +1115,6 @@ class BotCommands(commands.Cog):
     # =========================================================
     # DO TASK(S) — dropdown UI
     # =========================================================
-    @app_commands.command(name="do", description="Complete homework tasks using an interactive selector")
-
     # =========================================================
     # QUICK DO - autocomplete parameter
     # =========================================================
@@ -1128,6 +1168,7 @@ class BotCommands(commands.Cog):
         asyncio.create_task(
             _execute_jobs(interaction.followup, jobs, self, interaction.guild_id)
         )
+    @app_commands.command(name="do", description="Complete homework tasks using an interactive selector")
     async def do_task(self, interaction: Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         if interaction.guild_id is None:
@@ -1207,7 +1248,8 @@ class BotCommands(commands.Cog):
     async def restart_cmd(self, interaction: Interaction):
         await safe_send(interaction, "♻️ Restarting bot...")
         await self.bot.close()
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        subprocess.Popen([sys.executable] + sys.argv)
+        os._exit(0)
 
     @app_commands.command(name="shutdown", description="Stop the bot (owner)")
     @owner_only()
@@ -1250,7 +1292,8 @@ class BotCommands(commands.Cog):
             return
         await asyncio.sleep(2)
         await self.bot.close()
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        subprocess.Popen([sys.executable] + sys.argv)
+        os._exit(0)
 
     @app_commands.command(name="clear", description="Delete recent messages (owner)")
     @owner_only()
@@ -1337,42 +1380,4 @@ class BotCommands(commands.Cog):
 # ============================================================
 # AUTOCOMPLETE
 # ============================================================
-async def task_autocomplete(
-    interaction: Interaction,
-    current: str,
-) -> list[app_commands.Choice[str]]:
-    """Autocomplete for /quick-do parameter."""
-    if not interaction.guild_id:
-        return []
-    cog = interaction.client.get_cog("BotCommands")
-    if not cog:
-        return []
-    try:
-        homeworks = await cog._get_autocomplete_data(interaction.guild_id)
-    except Exception:
-        logger.exception("Autocomplete failed")
-        return []
-    choices: list[app_commands.Choice[str]] = []
-    current_lower = current.lower() if current else ""
-    for hw in homeworks:
-        hw_id = hw.get("id", "")
-        hw_name = hw.get("name", "Unnamed") or "?"
-        for idx, task in enumerate(hw.get("tasks", [])):
-            if len(choices) >= 25:
-                break
-            if task.get("percentage", 0) >= 100:
-                continue
-            task_name = task.get("translation", "Unknown") or "?"
-            value = str(hw_id) + ":" + str(idx)
-            label = (str(hw_name)[:20] + " - " + str(task_name)[:30])[:75]
-            if current_lower:
-                if current_lower in value.lower() or current_lower in label.lower():
-                    choices.append(app_commands.Choice(name=label, value=value))
-            else:
-                if len(choices) < 25:
-                    choices.append(app_commands.Choice(name=label, value=value))
-        if len(choices) >= 25:
-            break
-    return choices[:25]
-async def setup(bot: commands.Bot):
-    await bot.add_cog(BotCommands(bot))
+
