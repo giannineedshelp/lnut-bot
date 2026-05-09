@@ -1,5 +1,17 @@
 # LanguageNut Bot — Changelog
 
+
+## v2.0.2 — Setup ordering fix + code quality
+
+### Fixed
+- **`setup()` function misplaced** — defined before `BotCommands` class at module level; moved to end of file after the class definition. While Python's late binding prevented a runtime crash, static analyzers flagged this as a `NameError` risk, and it broke IDE navigation/autocomplete in VS Studio
+- **PEP8 blank-line violations** — added missing blank lines between `quick_do` and `do_task` methods, and before module-level function definitions
+
+### Improvements
+- All `.py` files compile clean and import without errors
+- Full code review completed: no syntax errors, no dead code, no async/await issues remain
+- Consistent file structure with `setup()` following the standard discord.py pattern (last function in the module, after all class definitions)
+
 ## v2.0.1 — Hotfix: critical runtime errors + Windows compat
 
 ### Fixed

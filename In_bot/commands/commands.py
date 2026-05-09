@@ -910,8 +910,6 @@ async def task_autocomplete(
         if len(choices) >= 25:
             break
     return choices[:25]
-async def setup(bot: commands.Bot):
-    await bot.add_cog(BotCommands(bot))
 
 # ============================================================
 # MAIN COG
@@ -1168,6 +1166,7 @@ class BotCommands(commands.Cog):
         asyncio.create_task(
             _execute_jobs(interaction.followup, jobs, self, interaction.guild_id)
         )
+
     @app_commands.command(name="do", description="Complete homework tasks using an interactive selector")
     async def do_task(self, interaction: Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -1378,6 +1377,5 @@ class BotCommands(commands.Cog):
 
 
 # ============================================================
-# AUTOCOMPLETE
-# ============================================================
-
+async def setup(bot: commands.Bot):
+    await bot.add_cog(BotCommands(bot))
