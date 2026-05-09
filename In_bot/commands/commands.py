@@ -17,6 +17,7 @@ import platform
 import subprocess
 import sys
 import time
+import math
 from typing import Any, Optional
 import aiohttp
 
@@ -67,6 +68,15 @@ def _is_done(task: dict) -> bool:
 def _progress_bar(pct: int, length: int = 10) -> str:
     filled = round(max(0, min(100, pct)) / (100 / length))
     return "█" * filled + "░" * (length - filled)
+
+def _validate_seconds(val: str) -> bool:
+    """Check if a seconds value is within valid range (60-10M)."""
+    try:
+        secs = float(val.strip())
+        return 60.0 <= secs <= 10000000.0
+    except (ValueError, TypeError):
+        return False
+
 
 
 # ============================================================
@@ -142,7 +152,12 @@ class SettingModal(ui.Modal):
     async def on_submit(self, interaction: Interaction):
         raw = self.field.value.strip()
         try:
-            value = self.caster(raw)
+            # Convert seconds string to exponent for fake_time_exponent
+            if self.key == "fake_time_exponent" and self.caster is str:
+                seconds = float(raw)
+                value = round(math.log10(max(60.0, seconds)), 2)
+            else:
+                value = self.caster(raw)
             if not self.validator(value):
                 raise ValueError("Value out of allowed range.")
         except (ValueError, TypeError) as e:
@@ -290,6 +305,22 @@ class SettingsView(ui.View):
             )
         )
 
+
+    @ui.button(label="Fantime (sec)", style=ButtonStyle.primary, row=0)
+    async def fake_time_seconds_btn(self, interaction: Interaction, _: ui.Button):
+        """Set fake time directly in seconds instead of exponent."""
+        s = config.get_guild_settings(interaction.guild_id)
+        current_secs = str(int(10 ** s["fake_time_exponent"]))
+        await interaction.response.send_modal(
+            SettingModal(
+                "fake_time_exponent",
+                "Fake time in seconds (60 - 10,000,000)",
+                current_secs,
+                str,
+                _validate_seconds,
+                self,
+            )
+        )
     @ui.button(label="🕰️ Toggle Fake Time", style=ButtonStyle.secondary, row=0)
     async def fake_time_toggle_btn(self, interaction: Interaction, _: ui.Button):
         if interaction.guild_id is None:
@@ -926,18 +957,24 @@ class BotCommands(commands.Cog):
     # =========================================================
 
     async def _get_autocomplete_data(self, guild_id: int) -> list[dict]:
-        """Return cached homework list for autocomplete, refreshing if stale."""
+        """Return cached homework for autocomplete, background refresh if stale."""
         now = time.monotonic()
         cached_time = AC_CACHE_TIME.get(guild_id, 0)
         cached_data = AC_CACHE.get(guild_id)
+        # Fast path: return fresh cache immediately
         if cached_data and (now - cached_time) < AC_CACHE_TTL:
             return cached_data
+        # Stale cache: return it, refresh in background
+        if cached_data:
+            asyncio.create_task(self._refresh_ac_cache(guild_id))
+            return cached_data
+        # No cache: try sync fetch (may timeout but first-call only)
         acct = config.get_account(guild_id)
         if not acct:
-            return cached_data or []
+            return []
         client = await self._get_api_client(guild_id)
         if not client:
-            return cached_data or []
+            return []
         discoverer = HomeworkDiscoverer(client)
         try:
             homeworks = await discoverer.get_all_homeworks(client.token)
@@ -945,8 +982,26 @@ class BotCommands(commands.Cog):
             AC_CACHE_TIME[guild_id] = now
             return homeworks
         except Exception:
-            logger.exception("Autocomplete homework fetch failed")
-            return cached_data or []
+            logger.exception("Autocomplete initial fetch failed")
+            return []
+
+    async def _refresh_ac_cache(self, guild_id: int) -> None:
+        """Background refresh. Never blocks autocomplete response."""
+        try:
+            acct = config.get_account(guild_id)
+            if not acct:
+                return
+            client = await self._get_api_client(guild_id)
+            if not client:
+                return
+            discoverer = HomeworkDiscoverer(client)
+            homeworks = await discoverer.get_all_homeworks(client.token)
+            AC_CACHE[guild_id] = homeworks
+            AC_CACHE_TIME[guild_id] = time.monotonic()
+            logger.info("AC cache refreshed for guild %s", guild_id)
+        except Exception:
+            logger.exception("AC background refresh failed")
+
     # LOGIN / LOGOUT
     # =========================================================
     @app_commands.command(name="login", description="Log in to LanguageNut and securely store credentials")
