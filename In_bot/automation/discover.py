@@ -7,25 +7,9 @@ Mirrors the logic from lnut-client's client_application class.
 from __future__ import annotations
 
 import logging
+from utils.helper import _pct, _is_done
 
 logger = logging.getLogger("lnut_bot.discover")
-
-
-def _pct(task: dict) -> int:
-    """Safely extract completion percentage from a task as an int (0-100)."""
-    gr = task.get("gameResults")
-    if not gr:
-        return 0
-    raw = gr.get("percentage", 0)
-    try:
-        return int(float(raw))
-    except (ValueError, TypeError):
-        return 0
-
-
-def _is_done(task: dict) -> bool:
-    """A task is done when its completion percentage is >= 100."""
-    return _pct(task) >= 100
 
 
 class HomeworkDiscoverer:

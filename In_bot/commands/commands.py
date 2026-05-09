@@ -30,6 +30,7 @@ from automation.api_direct import LNApiClient
 from automation.discover import HomeworkDiscoverer
 from automation.stealth import StealthManager, seconds_to_human
 from utils.encryption import decrypt_value, encrypt_value
+from utils.helper import _pct, _is_done
 
 logger = logging.getLogger("lnut_bot.commands")
 
@@ -48,21 +49,6 @@ AC_CACHE_TIME: dict[int, float] = {}  # guild_id -> fetch timestamp
 # ============================================================
 # HELPERS
 # ============================================================
-
-def _pct(task: dict) -> int:
-    """Safely extract completion percentage from a task as an int (0-100)."""
-    gr = task.get("gameResults")
-    if not gr:
-        return 0
-    raw = gr.get("percentage", 0)
-    try:
-        return int(float(raw))
-    except (ValueError, TypeError):
-        return 0
-
-
-def _is_done(task: dict) -> bool:
-    return _pct(task) >= 100
 
 
 def _progress_bar(pct: int, length: int = 10) -> str:

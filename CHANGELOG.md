@@ -1,6 +1,22 @@
 # LanguageNut Bot — Changelog
 
 
+## v2.0.3 - Code deduplication, environment cleanup, Pylance fixes
+
+### Fixed
+- **GUILD_ID constant redefinition** - replaced try/except with conditional assignment;
+  Pylance no longer flags reportConstantRedefinition
+- **Pylance missing-import warnings** - added .vscode/settings.json pointing to correct
+  Python interpreter; suppressed reportUnknown* diagnostics (discord.py/aiohttp lack type stubs)
+
+### Improvements
+- **Deduplicated `_pct` and `_is_done`** - moved shared helpers from `automation/discover.py`
+  and `commands/commands.py` into `utils/helper.py`; both modules import from single source
+- **Removed unused packages** - `requests` and `aiofiles` are not imported anywhere;
+  dropped from `requirements.txt`
+- **Cleaned `.env`** - removed `COMMAND_PREFIX` (bot uses hardcoded `"!"`)
+- All files continue to compile clean (py_compile) and pass full import chain test
+
 ## v2.0.2 — Setup ordering fix + code quality
 
 ### Fixed
