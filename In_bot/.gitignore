@@ -22,4 +22,4 @@ Thumbs.db
 
 # IDE
 .idea/
-.vscode/
+.vscode/_*.py

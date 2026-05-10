@@ -698,6 +698,167 @@ class DoTaskView(ui.View):
         await interaction.response.edit_message(content="Cancelled.", embed=None, view=None)
 
 # ============================================================
+# ============================================================
+# XPGRIND - Language Select
+# ============================================================
+class XpGrindLanguageSelect(ui.Select):
+    """Select a language to grind XP from."""
+    def __init__(self, homeworks):
+        self.homeworks = homeworks
+        langs = {}
+        for hw in homeworks:
+            code = hw.get("languageCode", "?")
+            if code not in langs:
+                name = hw.get("language", code) or code
+                langs[code] = {"name": name, "code": code, "incomplete": 0}
+            for t in hw.get("tasks", []):
+                if not _is_done(t):
+                    langs[code]["incomplete"] += 1
+        options = []
+        for code, info in sorted(langs.items()):
+            if info["incomplete"] <= 0:
+                continue
+            label = f"{info['name']} ({code}) - {info['incomplete']} tasks"
+            options.append(discord.SelectOption(label=label[:100], value=code, emoji="\U0001f30d"))
+        if not options:
+            options.append(discord.SelectOption(label="No incomplete tasks", value="__NONE__"))
+        super().__init__(placeholder="Select a language to grind...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction):
+        view = self.view
+        chosen = self.values[0]
+        if chosen == "__NONE__":
+            await interaction.response.edit_message(content="Nothing to grind!", embed=None, view=None)
+            return
+        lang_hws = [h for h in self.homeworks if h.get("languageCode", "") == chosen]
+        task_view = XpGrindTaskView(lang_hws, view.cog, view.guild_id, view.user_id)
+        await interaction.response.edit_message(content=None, embed=task_view.build_embed(), view=task_view)
+
+
+class XpGrindView(ui.View):
+    """View for language selection in XP grind."""
+    def __init__(self, homeworks, cog, guild_id, user_id):
+        super().__init__(timeout=180)
+        self.homeworks = homeworks
+        self.cog = cog
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.add_item(XpGrindLanguageSelect(homeworks))
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This menu isn't for you.", ephemeral=True)
+            return False
+        return True
+
+    @ui.button(label="Cancel", style=ButtonStyle.danger, row=1)
+    async def cancel_btn(self, interaction, _):
+        await interaction.response.edit_message(content="Cancelled.", embed=None, view=None)
+
+
+# ============================================================
+# XPGRIND - Task selector for a language
+# ============================================================
+class XpGrindTaskSelect(ui.Select):
+    """Multi-select tasks across all homeworks in a language."""
+    def __init__(self, lang_homeworks):
+        self.lang_homeworks = lang_homeworks
+        options = [discord.SelectOption(label="Do ALL in this language", value="__ALL__",
+                   description="Complete every incomplete task across all assignments")]
+        for hw in lang_homeworks:
+            hw_name = hw.get("name", "Unnamed")[:80]
+            tasks = hw.get("tasks", [])
+            for idx, task in enumerate(tasks):
+                if _is_done(task):
+                    continue
+                p = _pct(task)
+                task_label = task.get("translation", "Unknown")
+                display = f"{hw_name} - {task_label}"
+                if len(display) > 97:
+                    display = display[:94] + "..."
+                options.append(discord.SelectOption(
+                    label=display, value=f"{hw.get('id')}:{idx}",
+                    description=f"{p}% complete", emoji="\U0001f4dd"))
+                if len(options) >= 25:
+                    break
+            if len(options) >= 25:
+                break
+        super().__init__(placeholder="Select task(s) to grind...", min_values=1,
+                         max_values=min(len(options), 25), options=options)
+
+    async def callback(self, interaction):
+        view = self.view
+        chosen = self.values
+        if "__ALL__" in chosen:
+            jobs = [(hw, t) for hw in self.lang_homeworks
+                    for t in hw.get("tasks", []) if not _is_done(t)]
+        else:
+            jobs = []
+            for val in chosen:
+                try:
+                    hw_id_str, idx_str = val.split(":", 1)
+                    hw_id = int(hw_id_str); idx = int(idx_str)
+                    hw = next((h for h in self.lang_homeworks if h.get("id") == hw_id), None)
+                    if hw:
+                        tasks = hw.get("tasks", [])
+                        if 0 <= idx < len(tasks):
+                            jobs.append((hw, tasks[idx]))
+                except (ValueError, IndexError):
+                    continue
+        if not jobs:
+            await interaction.response.edit_message(content="No valid tasks selected.", embed=None, view=None)
+            return
+        await interaction.response.edit_message(
+            content=f"Starting **{len(jobs)}** task(s) for XP grind...",
+            embed=None, view=None)
+        asyncio.create_task(_execute_jobs(interaction.followup, jobs, view.cog, view.guild_id))
+
+
+class XpGrindTaskView(ui.View):
+    """View for task selection within a language's homeworks."""
+    def __init__(self, lang_homeworks, cog, guild_id, user_id):
+        super().__init__(timeout=180)
+        self.lang_homeworks = lang_homeworks
+        self.cog = cog
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.add_item(XpGrindTaskSelect(lang_homeworks))
+
+    def build_embed(self):
+        lang_name = (self.lang_homeworks[0].get("language", "Unknown")
+                     if self.lang_homeworks else "Unknown")
+        total_hw = len(self.lang_homeworks)
+        incomplete = sum(1 for hw in self.lang_homeworks
+                         for t in hw.get("tasks", []) if not _is_done(t))
+        embed = discord.Embed(
+            title=f"XP Grind - {lang_name}",
+            description=(f"Found **{incomplete}** incomplete task(s) across "
+                         f"**{total_hw}** assignment(s).\n\n"
+                         "Select tasks below to grind them for XP."),
+            color=discord.Color.green())
+        embed.set_footer(text="Tasks are auto-completed with stealth timing.")
+        return embed
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This menu isn't for you.", ephemeral=True)
+            return False
+        return True
+
+    @ui.button(label="Back", style=ButtonStyle.secondary, row=1)
+    async def back_btn(self, interaction, _):
+        cached = self.cog._hw_cache.get(self.guild_id, (0, []))[1]
+        view = XpGrindView(cached or self.lang_homeworks, self.cog, self.guild_id, self.user_id)
+        embed = discord.Embed(title="XP Grind",
+                              description="Select a language to see available tasks.",
+                              color=discord.Color.green())
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @ui.button(label="Cancel", style=ButtonStyle.danger, row=1)
+    async def cancel_btn(self, interaction, _):
+        await interaction.response.edit_message(content="Cancelled.", embed=None, view=None)
+
+
 # SHARED JOB EXECUTOR
 # ============================================================
 async def _execute_jobs(
@@ -1135,6 +1296,37 @@ class BotCommands(commands.Cog):
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # =========================================================
+    # =========================================================
+    # XPGRIND - Language/task XP grinding
+    # =========================================================
+    @app_commands.command(name="xpgrind", description="Grind XP by completing tasks in a language")
+    async def xpgrind(self, interaction):
+        """Grind XP by selecting a language and completing tasks."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if interaction.guild_id is None:
+            await interaction.followup.send("Guild only.", ephemeral=True)
+            return
+        client = await self._get_api_client(interaction.guild_id)
+        if not client:
+            await interaction.followup.send("Not logged in. Use /login first.", ephemeral=True)
+            return
+        homeworks = await self._get_homeworks_cached(interaction.guild_id, client, force=True)
+        if not homeworks:
+            await interaction.followup.send("No homework found.", ephemeral=True)
+            return
+        has_incomplete = any(not _is_done(t) for hw in homeworks for t in hw.get("tasks", []))
+        if not has_incomplete:
+            await interaction.followup.send("All homework is already at 100%! Nothing left to grind.", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title="XP Grind",
+            description="Select a language to see available tasks for XP grinding.",
+            color=discord.Color.green(),
+        )
+        view = XpGrindView(homeworks, self, interaction.guild_id, interaction.user.id)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
     # SETTINGS
     # =========================================================
     @app_commands.command(name="settings", description="Open the settings panel")
@@ -1210,6 +1402,142 @@ class BotCommands(commands.Cog):
             acct = config.get_account(interaction.guild_id)
             embed.add_field(name="Logged in", value="✅" if acct else "❌", inline=True)
         await safe_send(interaction, embed=embed)
+
+    @app_commands.command(name="leaderboard", description="View the LanguageNut leaderboard")
+    @app_commands.describe(
+        ltype="Leaderboard type: class, school, or global",
+        position="Number of top entries to show (1-50)"
+    )
+    @app_commands.choices(ltype=[
+        app_commands.Choice(name="Class Leaderboard", value="class"),
+        app_commands.Choice(name="School Leaderboard", value="school"),
+        app_commands.Choice(name="Global Leaderboard", value="global"),
+    ])
+    async def leaderboard_cmd(self, interaction: Interaction, ltype: str, position: app_commands.Range[int, 1, 50] = 10):
+        """Display leaderboard rankings from LanguageNut."""
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild_id is None:
+            await interaction.followup.send("Guild only.", ephemeral=True)
+            return
+
+        client = await self._get_api_client(interaction.guild_id)
+        if not client:
+            await interaction.followup.send("Not logged in. Use `/login` first.", ephemeral=True)
+            return
+
+        try:
+            if ltype == "class":
+                data = await client.get_class_leaderboard()
+                if not data:
+                    await interaction.followup.send("No class data found.", ephemeral=True)
+                    return
+
+                embed = discord.Embed(
+                    title="Class Leaderboard",
+                    description="Top classes by student scores",
+                    color=discord.Color.blue(),
+                )
+
+                sorted_classes = sorted(
+                    data,
+                    key=lambda c: max(int(s.get("score", 0)) for s in c.get("list", [])) if c.get("list") else 0,
+                    reverse=True,
+                )
+
+                for i, cls in enumerate(sorted_classes[:position], 1):
+                    cls_name = cls.get("name", "Unknown Class")
+                    students = cls.get("list", [])
+                    top_score = max(int(s.get("score", 0)) for s in students) if students else 0
+                    total_students = len(students)
+                    medal = chr(0x1F947) if i == 1 else (chr(0x1F948) if i == 2 else (chr(0x1F949) if i == 3 else f"`#{i}`"))
+                    embed.add_field(
+                        name=f"{medal} {cls_name[:100]}",
+                        value=f"Students: {total_students} | Top score: **{top_score:,}**",
+                        inline=False,
+                    )
+
+                embed.set_footer(text=f"Showing top {min(position, len(sorted_classes))} classes")
+
+            elif ltype == "school":
+                data = await client.get_school_leaderboard()
+                if not data:
+                    await interaction.followup.send("No school leaderboard data found.", ephemeral=True)
+                    return
+
+                embed = discord.Embed(
+                    title="School Leaderboard",
+                    description="All students in your school ranked by score",
+                    color=discord.Color.green(),
+                )
+
+                sorted_students = sorted(data, key=lambda s: int(s.get("score", 0)), reverse=True)
+                total = len(sorted_students)
+                user_rank = None
+                for idx_s, s in enumerate(sorted_students):
+                    if s.get("isUser") == "1":
+                        user_rank = idx_s + 1
+                        break
+
+                desc_lines = [f"Total students: **{total}**"]
+                if user_rank:
+                    desc_lines.append(f"Your rank: **#{user_rank}**")
+                embed.description = chr(10).join(desc_lines)
+
+                top_n = min(position, len(sorted_students))
+                lines = []
+                for i in range(top_n):
+                    s = sorted_students[i]
+                    name = s.get("name", "Unknown")
+                    score = int(s.get("score", 0))
+                    medal = chr(0x1F947) if i == 0 else (chr(0x1F948) if i == 1 else (chr(0x1F949) if i == 2 else f"`#{i+1}`"))
+                    lines.append(f"{medal} **{name}** -- {score:,} pts")
+
+                embed.add_field(name=f"Top {top_n}", value=chr(10).join(lines), inline=False)
+
+                if user_rank and user_rank > top_n:
+                    u = sorted_students[user_rank - 1]
+                    embed.add_field(name="Your Position", value=f"#{user_rank} -- **{u.get('name', 'You')}** ({int(u.get('score', 0)):,} pts)", inline=False)
+
+            elif ltype == "global":
+                data = await client.get_school_rankings()
+                if not data:
+                    await interaction.followup.send("No global leaderboard data found.", ephemeral=True)
+                    return
+
+                embed = discord.Embed(
+                    title="Global School Rankings",
+                    description="Top schools worldwide by total score",
+                    color=discord.Color.purple(),
+                )
+
+                sorted_schools = sorted(data, key=lambda s: int(s.get("score", 0)), reverse=True)
+                top_n = min(position, len(sorted_schools))
+
+                lines = []
+                for i in range(top_n):
+                    s = sorted_schools[i]
+                    name = s.get("name", "Unknown School")
+                    score = int(s.get("score", 0))
+                    rank = s.get("rank", str(i + 1))
+                    medal = chr(0x1F947) if i == 0 else (chr(0x1F948) if i == 1 else (chr(0x1F949) if i == 2 else f"`#{rank}`"))
+                    lines.append(f"{medal} **{name[:60]}** -- {score:,} pts")
+
+                embed.add_field(name=f"Top {top_n} Schools", value=chr(10).join(lines), inline=False)
+
+                user_school = next((s for s in sorted_schools if "Saint Ambrose" in s.get("name", "")), None)
+                if user_school:
+                    embed.set_footer(text=f"Your school rank: #{user_school.get('rank', '?')} worldwide")
+
+            else:
+                await interaction.followup.send(f"Unknown leaderboard type: {ltype}", ephemeral=True)
+                return
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            logger.exception("Leaderboard fetch failed")
+            await interaction.followup.send(f"Failed to fetch leaderboard: {str(e)[:200]}", ephemeral=True)
+
 
     # =========================================================
     # ADMIN COMMANDS
@@ -1433,6 +1761,150 @@ class BotCommands(commands.Cog):
         if not my_pos and not entries:
             embed.description = "No ranking data available."
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+        await interaction.response.send_message("@everyone BOT IS OFFLINE " + chr(0x1F534))
+
+    @app_commands.command(name="say", description="Make the bot say something (owner)")
+    @owner_only()
+    @app_commands.describe(message="The message to send")
+    async def say_cmd(self, interaction: Interaction, message: str):
+        await interaction.response.send_message(message[:1900])
+
+    @app_commands.command(name="embed", description="Send an embedded message (owner)")
+    @owner_only()
+    @app_commands.describe(title="Embed title", description="Embed description", color="Hex color e.g. 00ff00")
+    async def embed_cmd(self, interaction: Interaction, title: str, description: str, color: str = "3498db"):
+        try:
+            color_int = int(color.strip("#"), 16)
+        except ValueError:
+            color_int = 0x3498db
+        embed = discord.Embed(title=title, description=description, color=color_int)
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="userinfo", description="Show info about a user (owner)")
+    @owner_only()
+    @app_commands.describe(user="The user to look up")
+    async def userinfo_cmd(self, interaction: Interaction, user: discord.User):
+        embed = discord.Embed(
+            title=f"User Info - {user}",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="ID", value=user.id, inline=True)
+        embed.add_field(name="Name", value=user.name, inline=True)
+        embed.add_field(name="Display Name", value=user.display_name, inline=True)
+        embed.add_field(name="Created", value=discord.utils.format_dt(user.created_at, style="R"), inline=True)
+        embed.add_field(name="Bot", value="Yes" if user.bot else "No", inline=True)
+        if isinstance(user, discord.Member):
+            embed.add_field(name="Joined", value=discord.utils.format_dt(user.joined_at, style="R"), inline=True)
+            roles = [r.mention for r in user.roles[1:]]
+            if roles:
+                embed.add_field(name=f"Roles ({len(roles)})", value=", ".join(roles[:5]) + (f" +{len(roles)-5}" if len(roles) > 5 else ""), inline=False)
+        await safe_send(interaction, embed=embed)
+
+    @app_commands.command(name="serverinfo", description="Show info about this server (owner)")
+    @owner_only()
+    async def serverinfo_cmd(self, interaction: Interaction):
+        if not interaction.guild:
+            await safe_send(interaction, "Guild only.")
+            return
+        guild = interaction.guild
+        embed = discord.Embed(
+            title=f"Server Info - {guild.name}",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.add_field(name="ID", value=guild.id, inline=True)
+        embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
+        embed.add_field(name="Members", value=guild.member_count, inline=True)
+        embed.add_field(name="Channels", value=len(guild.channels), inline=True)
+        embed.add_field(name="Roles", value=len(guild.roles), inline=True)
+        embed.add_field(name="Boosts", value=guild.premium_subscription_count, inline=True)
+        embed.add_field(name="Created", value=discord.utils.format_dt(guild.created_at, style="R"), inline=True)
+        await safe_send(interaction, embed=embed)
+
+    @app_commands.command(name="dm", description="DM a user (owner)")
+    @owner_only()
+    @app_commands.describe(user="The user to DM", message="The message to send")
+    async def dm_cmd(self, interaction: Interaction, user: discord.User, message: str):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await user.send(message[:1900])
+            await interaction.followup.send(f"DM sent to **{user}**", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("Cannot DM that user (DMs closed or blocked).", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"Failed: {e}", ephemeral=True)
+
+    @app_commands.command(name="nickname", description="Change a user's nickname (owner)")
+    @owner_only()
+    @app_commands.describe(user="The user", nickname="New nickname (or blank to reset)")
+    async def nickname_cmd(self, interaction: Interaction, user: discord.Member, nickname: str = ""):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if nickname:
+                await user.edit(nick=nickname[:32])
+                await interaction.followup.send(f"Nickname set to **{nickname[:32]}** for {user.mention}", ephemeral=True)
+            else:
+                await user.edit(nick=None)
+                await interaction.followup.send(f"Nickname reset for {user.mention}", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("I don't have permission to change that user's nickname.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"Failed: {e}", ephemeral=True)
+
+    @app_commands.command(name="purge", description="Bulk delete messages from a channel (owner)")
+    @owner_only()
+    @app_commands.describe(amount="Number of messages to delete (1-500)")
+    async def purge_cmd(self, interaction: Interaction, amount: app_commands.Range[int, 1, 500] = 50):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel) and not isinstance(channel, discord.Thread):
+            await safe_send(interaction, "Text channels and threads only.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            deleted = await channel.purge(limit=amount, bulk=True)
+            await interaction.followup.send(f"Purged {len(deleted)} messages.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("I don't have permission.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"Failed: {e}", ephemeral=True)
+
+    @app_commands.command(name="lockdown", description="Lock or unlock a channel (owner)")
+    @owner_only()
+    @app_commands.describe(mode="lock to restrict or unlock to open")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="Lock Channel", value="lock"),
+        app_commands.Choice(name="Unlock Channel", value="unlock"),
+    ])
+    async def lockdown_cmd(self, interaction: Interaction, mode: str):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await safe_send(interaction, "Text channels only.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            guild = interaction.guild
+            if not guild:
+                return
+            default_role = guild.default_role
+            overwrite = channel.overwrites_for(default_role)
+            if mode == "lock":
+                overwrite.send_messages = False
+                await channel.set_permissions(default_role, overwrite=overwrite)
+                await interaction.followup.send(chr(0x1F512) + " Channel locked. Only users with special roles can talk.", ephemeral=True)
+            else:
+                overwrite.send_messages = None
+                await channel.set_permissions(default_role, overwrite=overwrite)
+                await interaction.followup.send(chr(0x1F513) + " Channel unlocked.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("I don't have permission to manage this channel.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"Failed: {e}", ephemeral=True)
+
 
 # ============================================================
 async def setup(bot: commands.Bot):
