@@ -1142,6 +1142,54 @@ class BotCommands(commands.Cog):
     # =========================================================
     # STATUS
     # =========================================================
+    @app_commands.command(name="tutorial", description="Show the bot tutorial / user guide")
+    @app_commands.command(name="tutorial", description="Show the bot tutorial / user guide")
+    @app_commands.command(name="tutorial", description="Show the bot tutorial / user guide")
+    async def tutorial_cmd(self, interaction: Interaction):
+        """Read tutorial.md and display it as a paginated embed."""
+        await interaction.response.defer(ephemeral=True)
+        tut_paths = [
+            "tutorial.md",
+            os.path.join(os.path.dirname(__file__), "..", "tutorial.md"),
+        ]
+        tut_file = next((p for p in tut_paths if os.path.exists(p)), None)
+        if not tut_file:
+            await interaction.followup.send("Tutorial file not found.", ephemeral=True)
+            return
+        try:
+            with open(tut_file, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError as e:
+            await interaction.followup.send(f"Error reading tutorial: {e}", ephemeral=True)
+            return
+        pages = []
+        current_section = ""
+        current_lines = []
+        for line in content.splitlines():
+            if line.startswith("# ") and current_lines:
+                body = chr(10).join(current_lines).strip()
+                pages.append((current_section, body))
+                current_lines = []
+            if line.startswith("# "):
+                current_section = line[2:].strip()
+            else:
+                current_lines.append(line)
+        if current_lines:
+            body = chr(10).join(current_lines).strip()
+            pages.append((current_section, body))
+        if not pages:
+            await interaction.followup.send("Tutorial is empty.", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title=pages[0][0],
+            description=pages[0][1][:4000],
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(
+            text="Page 1/" + str(len(pages)) + " | /settings to customize"
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     @app_commands.command(name="status", description="Show bot status")
     async def status_cmd(self, interaction: Interaction):
         embed = discord.Embed(

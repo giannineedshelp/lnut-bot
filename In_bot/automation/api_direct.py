@@ -349,7 +349,7 @@ class LNApiClient:
         # JS: score = vocabs.length * 200  (uses TOTAL count, not just correct)
         score = len(task_data) * 200
 
-        # Stealth timestamp (JS: Math.floor(speed + jitter) * 1000)
+        # Stealth timestamp: per-question cumulative sum + jitter
         timestamp_ms = self.stealth.compute_timestamp(len(task_data))
 
         payload = {

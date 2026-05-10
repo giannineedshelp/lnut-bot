@@ -25,7 +25,7 @@ def get_fernet() -> Fernet | None:
         # Support both raw base64 keys and passphrase-based keys
         if len(key_str) == 44 and key_str.endswith("="):
             # Looks like a raw Fernet key
-            key = key_str.encode() if isinstance(key_str, str) else key_str
+            key = key_str.encode()
         else:
             # Derive a key from the passphrase
             salt = b"lnut_bot_salt_fixed"  # Fixed salt for deterministic key

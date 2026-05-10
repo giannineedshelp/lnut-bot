@@ -50,20 +50,15 @@ class StealthManager:
 
     Parameters
     ----------
-    speed : float
-        Base seconds per task. Used when fake_time_enabled=False.
-        Minimum enforced: 3.0 seconds.
     min_accuracy : int
-        Minimum accuracy percentage (0–100).
+        Minimum accuracy percentage (0-100).
     max_accuracy : int
-        Maximum accuracy percentage (0–100).
+        Maximum accuracy percentage (0-100).
         If min_accuracy > max_accuracy they are automatically swapped.
-    fake_time_enabled : bool
-        When True, use fake_time_exponent to compute an inflated timestamp
-        (mirrors JS: speed = 10 ** slider_value).
-    fake_time_exponent : float
-        The exponent x in 10^x seconds. E.g. 4.0 → 10000 seconds (~2.8 hours).
-        Valid range: 0.0–7.0  (7.0 ≈ 3.17 years).
+    min_seconds_per_question : float
+        Minimum seconds per question/vocab item (default 5.0).
+    max_seconds_per_question : float
+        Maximum seconds per question/vocab item (default 8.0).
     """
 
     PER_QUESTION_MIN_SEC = 1.0
