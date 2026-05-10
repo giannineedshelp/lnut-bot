@@ -1,5 +1,4 @@
-LANGUAGENUT BOT — COMMANDS LIST (v2)
-
+LANGUAGENUT BOT — COMMANDS LIST (v3)
 ========================
 USER COMMANDS
 ========================
@@ -14,28 +13,30 @@ USER COMMANDS
 /homework
 - Lists all homework assignments with a paginated view
 - Shows completion percentages and progress
-- No more 25-field limit crash on many homeworks
 
-/do <task>
-- Run one or multiple tasks with autocomplete
-- Format: hwId:idx  (e.g. 123:0)
-- Multi-task: 123:0, 123:1, 456:2
+/do
+- Complete homework tasks using an interactive selector
+- Choose specific assignments or "Do ALL"
+
+/quick-do <task>
+- Quick-complete a task by homework:index format
+- Multi-task: 123:0, 456:2
 - Uses concurrency setting to run in parallel
-- Auto-retries on failure (configurable)
-- Autocomplete is cached for speed
 
 /settings
 - Interactive panel with persistent per-guild settings
-  • Speed (sec/task) via modal
-  • Min / Max Accuracy via modal
-  • Concurrency (1–8) via modal
-  • Retry attempts (0–5) via modal
-  • Toggle stealth mode
-  • Toggle auto-retry
-  • Reset to defaults
+- Speed, Accuracy, Concurrency, Retry, Stealth toggle
 
 /status
 - Bot latency, servers, users, python version, login state
+
+/tutorial
+- Shows the bot tutorial / user guide
+
+/leaderboard <type> [position]
+- View LanguageNut leaderboards
+- Types: class (by class), school (all students), global (worldwide schools)
+- position: number of top entries to show (1-50, default 10)
 
 ========================
 ADMIN COMMANDS (OWNER ONLY)
@@ -45,19 +46,26 @@ ADMIN COMMANDS (OWNER ONLY)
 /shutdown         - Stop the bot
 /update           - git pull + restart
 /sync             - Sync slash commands (guild + global)
-/clear <amount>   - Delete recent messages (1–100)
-/logs             - Last 20 log lines
-/reload <cog>     - Reload a cog (accepts 'commands' or 'commands.commands')
+/clear <amount>   - Delete recent messages (1-100)
+/purge <amount>   - Bulk delete messages (1-500)
+/logs             - Show last 20 log lines
+/reload <cog>     - Reload a cog
 /eval <code>      - Async python eval sandbox
 /online           - Announce ONLINE ping
 /offline          - Announce OFFLINE ping
+/say <message>    - Make the bot say something
+/embed <title> <desc> [color] - Send an embedded message
+/userinfo <user>  - Show detailed user info
+/serverinfo       - Show detailed server info
+/dm <user> <msg>  - DM a user
+/nickname <user> [name] - Change a user's nickname
+/lockdown <mode>  - Lock or unlock a channel
 
 ========================
 SYSTEM NOTES
 ========================
-
 - All credentials stored via Fernet encryption
 - Homework data cached for 20s for fast autocomplete
 - Completed (100%) tasks filtered from autocomplete
-- Discord 25-field embed limit fixed via pagination
-- Single consolidated commands file (commands/commands.py)
+- Leaderboard data fetched live from LanguageNut API
+- New admin commands: say, embed, userinfo, serverinfo, dm, nickname, purge, lockdown

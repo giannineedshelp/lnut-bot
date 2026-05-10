@@ -1149,8 +1149,6 @@ class BotCommands(commands.Cog):
     # STATUS
     # =========================================================
     @app_commands.command(name="tutorial", description="Show the bot tutorial / user guide")
-    @app_commands.command(name="tutorial", description="Show the bot tutorial / user guide")
-    @app_commands.command(name="tutorial", description="Show the bot tutorial / user guide")
     async def tutorial_cmd(self, interaction: Interaction):
         """Read tutorial.md and display it as a paginated embed."""
         await interaction.response.defer(ephemeral=True)
@@ -1212,6 +1210,142 @@ class BotCommands(commands.Cog):
             acct = config.get_account(interaction.guild_id)
             embed.add_field(name="Logged in", value="✅" if acct else "❌", inline=True)
         await safe_send(interaction, embed=embed)
+
+    @app_commands.command(name="leaderboard", description="View the LanguageNut leaderboard")
+    @app_commands.describe(
+        ltype="Leaderboard type: class, school, or global",
+        position="Number of top entries to show (1-50)"
+    )
+    @app_commands.choices(ltype=[
+        app_commands.Choice(name="Class Leaderboard", value="class"),
+        app_commands.Choice(name="School Leaderboard", value="school"),
+        app_commands.Choice(name="Global Leaderboard", value="global"),
+    ])
+    async def leaderboard_cmd(self, interaction: Interaction, ltype: str, position: app_commands.Range[int, 1, 50] = 10):
+        """Display leaderboard rankings from LanguageNut."""
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild_id is None:
+            await interaction.followup.send("Guild only.", ephemeral=True)
+            return
+
+        client = await self._get_api_client(interaction.guild_id)
+        if not client:
+            await interaction.followup.send("Not logged in. Use `/login` first.", ephemeral=True)
+            return
+
+        try:
+            if ltype == "class":
+                data = await client.get_class_leaderboard()
+                if not data:
+                    await interaction.followup.send("No class data found.", ephemeral=True)
+                    return
+
+                embed = discord.Embed(
+                    title="Class Leaderboard",
+                    description="Top classes by student scores",
+                    color=discord.Color.blue(),
+                )
+
+                sorted_classes = sorted(
+                    data,
+                    key=lambda c: max(int(s.get("score", 0)) for s in c.get("list", [])) if c.get("list") else 0,
+                    reverse=True,
+                )
+
+                for i, cls in enumerate(sorted_classes[:position], 1):
+                    cls_name = cls.get("name", "Unknown Class")
+                    students = cls.get("list", [])
+                    top_score = max(int(s.get("score", 0)) for s in students) if students else 0
+                    total_students = len(students)
+                    medal = chr(0x1F947) if i == 1 else (chr(0x1F948) if i == 2 else (chr(0x1F949) if i == 3 else f"`#{i}`"))
+                    embed.add_field(
+                        name=f"{medal} {cls_name[:100]}",
+                        value=f"Students: {total_students} | Top score: **{top_score:,}**",
+                        inline=False,
+                    )
+
+                embed.set_footer(text=f"Showing top {min(position, len(sorted_classes))} classes")
+
+            elif ltype == "school":
+                data = await client.get_school_leaderboard()
+                if not data:
+                    await interaction.followup.send("No school leaderboard data found.", ephemeral=True)
+                    return
+
+                embed = discord.Embed(
+                    title="School Leaderboard",
+                    description="All students in your school ranked by score",
+                    color=discord.Color.green(),
+                )
+
+                sorted_students = sorted(data, key=lambda s: int(s.get("score", 0)), reverse=True)
+                total = len(sorted_students)
+                user_rank = None
+                for idx_s, s in enumerate(sorted_students):
+                    if s.get("isUser") == "1":
+                        user_rank = idx_s + 1
+                        break
+
+                desc_lines = [f"Total students: **{total}**"]
+                if user_rank:
+                    desc_lines.append(f"Your rank: **#{user_rank}**")
+                embed.description = chr(10).join(desc_lines)
+
+                top_n = min(position, len(sorted_students))
+                lines = []
+                for i in range(top_n):
+                    s = sorted_students[i]
+                    name = s.get("name", "Unknown")
+                    score = int(s.get("score", 0))
+                    medal = chr(0x1F947) if i == 0 else (chr(0x1F948) if i == 1 else (chr(0x1F949) if i == 2 else f"`#{i+1}`"))
+                    lines.append(f"{medal} **{name}** -- {score:,} pts")
+
+                embed.add_field(name=f"Top {top_n}", value=chr(10).join(lines), inline=False)
+
+                if user_rank and user_rank > top_n:
+                    u = sorted_students[user_rank - 1]
+                    embed.add_field(name="Your Position", value=f"#{user_rank} -- **{u.get('name', 'You')}** ({int(u.get('score', 0)):,} pts)", inline=False)
+
+            elif ltype == "global":
+                data = await client.get_school_rankings()
+                if not data:
+                    await interaction.followup.send("No global leaderboard data found.", ephemeral=True)
+                    return
+
+                embed = discord.Embed(
+                    title="Global School Rankings",
+                    description="Top schools worldwide by total score",
+                    color=discord.Color.purple(),
+                )
+
+                sorted_schools = sorted(data, key=lambda s: int(s.get("score", 0)), reverse=True)
+                top_n = min(position, len(sorted_schools))
+
+                lines = []
+                for i in range(top_n):
+                    s = sorted_schools[i]
+                    name = s.get("name", "Unknown School")
+                    score = int(s.get("score", 0))
+                    rank = s.get("rank", str(i + 1))
+                    medal = chr(0x1F947) if i == 0 else (chr(0x1F948) if i == 1 else (chr(0x1F949) if i == 2 else f"`#{rank}`"))
+                    lines.append(f"{medal} **{name[:60]}** -- {score:,} pts")
+
+                embed.add_field(name=f"Top {top_n} Schools", value=chr(10).join(lines), inline=False)
+
+                user_school = next((s for s in sorted_schools if "Saint Ambrose" in s.get("name", "")), None)
+                if user_school:
+                    embed.set_footer(text=f"Your school rank: #{user_school.get('rank', '?')} worldwide")
+
+            else:
+                await interaction.followup.send(f"Unknown leaderboard type: {ltype}", ephemeral=True)
+                return
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            logger.exception("Leaderboard fetch failed")
+            await interaction.followup.send(f"Failed to fetch leaderboard: {str(e)[:200]}", ephemeral=True)
+
 
     # =========================================================
     # ADMIN COMMANDS
@@ -1346,7 +1480,149 @@ class BotCommands(commands.Cog):
     @app_commands.command(name="offline", description="Announce OFFLINE (owner)")
     @owner_only()
     async def offline_cmd(self, interaction: Interaction):
-        await interaction.response.send_message("@everyone BOT IS OFFLINE 🔴")
+        await interaction.response.send_message("@everyone BOT IS OFFLINE " + chr(0x1F534))
+
+    @app_commands.command(name="say", description="Make the bot say something (owner)")
+    @owner_only()
+    @app_commands.describe(message="The message to send")
+    async def say_cmd(self, interaction: Interaction, message: str):
+        await interaction.response.send_message(message[:1900])
+
+    @app_commands.command(name="embed", description="Send an embedded message (owner)")
+    @owner_only()
+    @app_commands.describe(title="Embed title", description="Embed description", color="Hex color e.g. 00ff00")
+    async def embed_cmd(self, interaction: Interaction, title: str, description: str, color: str = "3498db"):
+        try:
+            color_int = int(color.strip("#"), 16)
+        except ValueError:
+            color_int = 0x3498db
+        embed = discord.Embed(title=title, description=description, color=color_int)
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="userinfo", description="Show info about a user (owner)")
+    @owner_only()
+    @app_commands.describe(user="The user to look up")
+    async def userinfo_cmd(self, interaction: Interaction, user: discord.User):
+        embed = discord.Embed(
+            title=f"User Info - {user}",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="ID", value=user.id, inline=True)
+        embed.add_field(name="Name", value=user.name, inline=True)
+        embed.add_field(name="Display Name", value=user.display_name, inline=True)
+        embed.add_field(name="Created", value=discord.utils.format_dt(user.created_at, style="R"), inline=True)
+        embed.add_field(name="Bot", value="Yes" if user.bot else "No", inline=True)
+        if isinstance(user, discord.Member):
+            embed.add_field(name="Joined", value=discord.utils.format_dt(user.joined_at, style="R"), inline=True)
+            roles = [r.mention for r in user.roles[1:]]
+            if roles:
+                embed.add_field(name=f"Roles ({len(roles)})", value=", ".join(roles[:5]) + (f" +{len(roles)-5}" if len(roles) > 5 else ""), inline=False)
+        await safe_send(interaction, embed=embed)
+
+    @app_commands.command(name="serverinfo", description="Show info about this server (owner)")
+    @owner_only()
+    async def serverinfo_cmd(self, interaction: Interaction):
+        if not interaction.guild:
+            await safe_send(interaction, "Guild only.")
+            return
+        guild = interaction.guild
+        embed = discord.Embed(
+            title=f"Server Info - {guild.name}",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.add_field(name="ID", value=guild.id, inline=True)
+        embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
+        embed.add_field(name="Members", value=guild.member_count, inline=True)
+        embed.add_field(name="Channels", value=len(guild.channels), inline=True)
+        embed.add_field(name="Roles", value=len(guild.roles), inline=True)
+        embed.add_field(name="Boosts", value=guild.premium_subscription_count, inline=True)
+        embed.add_field(name="Created", value=discord.utils.format_dt(guild.created_at, style="R"), inline=True)
+        await safe_send(interaction, embed=embed)
+
+    @app_commands.command(name="dm", description="DM a user (owner)")
+    @owner_only()
+    @app_commands.describe(user="The user to DM", message="The message to send")
+    async def dm_cmd(self, interaction: Interaction, user: discord.User, message: str):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await user.send(message[:1900])
+            await interaction.followup.send(f"DM sent to **{user}**", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("Cannot DM that user (DMs closed or blocked).", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"Failed: {e}", ephemeral=True)
+
+    @app_commands.command(name="nickname", description="Change a user's nickname (owner)")
+    @owner_only()
+    @app_commands.describe(user="The user", nickname="New nickname (or blank to reset)")
+    async def nickname_cmd(self, interaction: Interaction, user: discord.Member, nickname: str = ""):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if nickname:
+                await user.edit(nick=nickname[:32])
+                await interaction.followup.send(f"Nickname set to **{nickname[:32]}** for {user.mention}", ephemeral=True)
+            else:
+                await user.edit(nick=None)
+                await interaction.followup.send(f"Nickname reset for {user.mention}", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("I don't have permission to change that user's nickname.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"Failed: {e}", ephemeral=True)
+
+    @app_commands.command(name="purge", description="Bulk delete messages from a channel (owner)")
+    @owner_only()
+    @app_commands.describe(amount="Number of messages to delete (1-500)")
+    async def purge_cmd(self, interaction: Interaction, amount: app_commands.Range[int, 1, 500] = 50):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel) and not isinstance(channel, discord.Thread):
+            await safe_send(interaction, "Text channels and threads only.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            deleted = await channel.purge(limit=amount, bulk=True)
+            await interaction.followup.send(f"Purged {len(deleted)} messages.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("I don't have permission.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"Failed: {e}", ephemeral=True)
+
+    @app_commands.command(name="lockdown", description="Lock or unlock a channel (owner)")
+    @owner_only()
+    @app_commands.describe(mode="lock to restrict or unlock to open")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="Lock Channel", value="lock"),
+        app_commands.Choice(name="Unlock Channel", value="unlock"),
+    ])
+    async def lockdown_cmd(self, interaction: Interaction, mode: str):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await safe_send(interaction, "Text channels only.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            guild = interaction.guild
+            if not guild:
+                return
+            default_role = guild.default_role
+            overwrite = channel.overwrites_for(default_role)
+            if mode == "lock":
+                overwrite.send_messages = False
+                await channel.set_permissions(default_role, overwrite=overwrite)
+                await interaction.followup.send(chr(0x1F512) + " Channel locked. Only users with special roles can talk.", ephemeral=True)
+            else:
+                overwrite.send_messages = None
+                await channel.set_permissions(default_role, overwrite=overwrite)
+                await interaction.followup.send(chr(0x1F513) + " Channel unlocked.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("I don't have permission to manage this channel.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"Failed: {e}", ephemeral=True)
+
 
 # ============================================================
 async def setup(bot: commands.Bot):
