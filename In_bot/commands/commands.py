@@ -722,7 +722,6 @@ async def _execute_jobs(
 
     settings    = config.get_guild_settings(guild_id)
     concurrency = max(1, min(settings["concurrency"], 8))
-    max_retries = settings["retry_attempts"] if settings["auto_retry"] else 0
     sem         = asyncio.Semaphore(concurrency)
 
     async def run_one(hw: dict, t_obj: dict) -> tuple[str, str, bool, str]:
@@ -732,13 +731,16 @@ async def _execute_jobs(
         to_lang   = hw.get("languageCode", "")
 
         async with sem:
+            client.stealth.sync_settings(guild_id)
             attempt = 0
             while True:
                 attempt += 1
                 try:
                     data = await client.fetch_task_data(t_obj, game_link, to_lang)
                     if not data:
-                        if attempt <= max_retries:
+                        ls = config.get_guild_settings(guild_id)
+                        retries = ls["retry_attempts"] if ls["auto_retry"] else 0
+                        if attempt <= retries:
                             await asyncio.sleep(1.5 * attempt)
                             continue
                         return hw_name, task_name, False, "No data returned for task"
@@ -747,7 +749,9 @@ async def _execute_jobs(
 
                     if result.get("error"):
                         body = result.get("body", str(result))
-                        if attempt <= max_retries:
+                        ls = config.get_guild_settings(guild_id)
+                        retries = ls["retry_attempts"] if ls["auto_retry"] else 0
+                        if attempt <= retries:
                             await asyncio.sleep(1.5 * attempt)
                             continue
                         return hw_name, task_name, False, str(body)[:120]
@@ -756,7 +760,9 @@ async def _execute_jobs(
 
                 except Exception as e:
                     logger.exception("Task automation failed")
-                    if attempt <= max_retries:
+                    ls = config.get_guild_settings(guild_id)
+                    retries = ls["retry_attempts"] if ls["auto_retry"] else 0
+                    if attempt <= retries:
                         await asyncio.sleep(1.5 * attempt)
                         continue
                     return hw_name, task_name, False, str(e)[:120]

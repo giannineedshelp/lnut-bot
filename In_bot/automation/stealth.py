@@ -93,6 +93,27 @@ class StealthManager:
         self.min_seconds_per_question = max(self.PER_QUESTION_MIN_SEC, self.min_seconds_per_question)
         self.max_seconds_per_question = min(self.PER_QUESTION_MAX_SEC, self.max_seconds_per_question)
 
+    def sync_settings(self, guild_id: int) -> None:
+        """Reload timing & accuracy settings from guild config.
+
+        This allows pending/in-flight tasks to pick up settings changes
+        made via /settings while a batch is executing.
+        """
+        import config as _cfg
+        s = _cfg.get_guild_settings(guild_id)
+        min_a = max(0, min(100, int(s.get("min_accuracy", 85))))
+        max_a = max(0, min(100, int(s.get("max_accuracy", 92))))
+        if min_a > max_a:
+            min_a, max_a = max_a, min_a
+        self.min_accuracy = min_a
+        self.max_accuracy = max_a
+        min_s = float(s.get("min_seconds_per_question", 5.0))
+        max_s = float(s.get("max_seconds_per_question", 8.0))
+        if min_s > max_s:
+            min_s, max_s = max_s, min_s
+        self.min_seconds_per_question = max(self.PER_QUESTION_MIN_SEC, min_s)
+        self.max_seconds_per_question = min(self.PER_QUESTION_MAX_SEC, max_s)
+
     # ------------------------------------------------------------------
     # Timing
     # ------------------------------------------------------------------
