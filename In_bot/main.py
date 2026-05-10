@@ -128,6 +128,7 @@ class LanguageNutBot(commands.Bot):
             logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
         logger.info("Bot is online")
         logger.info("Logging systems initialized successfully")
+        self.start_time = discord.utils.utcnow()
         await self._announce_online()
 
     async def _announce_online(self):
@@ -138,6 +139,7 @@ class LanguageNutBot(commands.Bot):
                     channel_id = guild.system_channel.id
                     break
         if channel_id:
+            self._announce_channel_id = channel_id
             channel = self.get_channel(channel_id)
             if channel and isinstance(channel, discord.TextChannel):
                 try:
@@ -146,8 +148,21 @@ class LanguageNutBot(commands.Bot):
                 except Exception as e:
                     logger.warning(f"Failed to send online announcement: {e}")
 
+    async def _announce_offline(self):
+        channel_id = getattr(self, "_announce_channel_id", ANNOUNCE_CHANNEL_ID)
+        if not channel_id:
+            return
+        channel = self.get_channel(channel_id)
+        if channel and isinstance(channel, discord.TextChannel):
+            try:
+                await channel.send("@everyone BOT IS OFFLINE \U0001F534")
+                logger.info("Offline announcement sent")
+            except Exception as e:
+                logger.warning(f"Failed to send offline announcement: {e}")
+
     async def on_disconnect(self):
         logger.warning("Bot disconnected from Discord gateway")
+        await self._announce_offline()
 
     async def on_resumed(self):
         logger.info("Bot reconnected to Discord gateway")
@@ -179,6 +194,7 @@ class LanguageNutBot(commands.Bot):
             logger.warning(f"Failed command logging: {e}")
 
     async def close(self):
+        await self._announce_offline()
         if self.aiohttp_session is not None and not self.aiohttp_session.closed:
             await self.aiohttp_session.close()
         await super().close()
@@ -203,3 +219,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.getLogger("lnut_bot").info("Shutdown requested")
+
+

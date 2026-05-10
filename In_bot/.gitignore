@@ -1,25 +1,36 @@
 # Python
+*.pyc
+*.pyo
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
 *.egg-info/
+dist/
+build/
 
-# Environments
+# Environment
 .env
-.env.*
-!.env.example
+.venv/
+venv/
+env/
 
-# Bot config and logs (contain secrets)
-config.json
-logs/
-*.log
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
 
-# IDE
-.idea/
-.vscode/_*.py
+# Project logs (user data, not source)
+logs/
+
+# Discord token files
+token*
+*TOKEN*
+
+# SSH keys
+*.pem
+*.key
+

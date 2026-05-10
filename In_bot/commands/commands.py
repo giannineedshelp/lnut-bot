@@ -1229,6 +1229,16 @@ class BotCommands(commands.Cog):
         embed.add_field(name="Latency",     value=f"{round(self.bot.latency * 1000)}ms")
         embed.add_field(name="Python",      value=platform.python_version())
         embed.add_field(name="Discord.py",  value=discord.__version__)
+        if hasattr(self.bot, "start_time"):
+            uptime = discord.utils.utcnow() - self.bot.start_time
+            days = uptime.days
+            hours, rem = divmod(uptime.seconds, 3600)
+            minutes, _ = divmod(rem, 60)
+            parts = []
+            if days: parts.append(f"{days}d")
+            if hours: parts.append(f"{hours}h")
+            parts.append(f"{minutes}m")
+            embed.add_field(name="Uptime", value=":".join(parts), inline=True)
         if interaction.guild_id is not None:
             acct = config.get_account(interaction.guild_id)
             embed.add_field(name="Logged in", value="✅" if acct else "❌", inline=True)
@@ -1445,35 +1455,47 @@ class BotCommands(commands.Cog):
     @owner_only()
     @app_commands.describe(
         log_type="bot / user / homework",
-        level="debug/info/warning/error (bot type)",
+        level="Filter level for bot logs",
         user="Target user (required for user/homework types)",
+        lines="Number of log lines to show (5-200, default 30)",
     )
     @app_commands.choices(log_type=[
         app_commands.Choice(name="Bot Console Logs", value="bot"),
         app_commands.Choice(name="User Command History", value="user"),
         app_commands.Choice(name="Homework Results", value="homework"),
     ])
+    @app_commands.choices(level=[
+        app_commands.Choice(name="All levels", value="all"),
+        app_commands.Choice(name="DEBUG", value="debug"),
+        app_commands.Choice(name="INFO", value="info"),
+        app_commands.Choice(name="WARNING", value="warning"),
+        app_commands.Choice(name="ERROR", value="error"),
+        app_commands.Choice(name="CRITICAL", value="critical"),
+    ])
     async def logs_cmd(
         self,
         interaction: Interaction,
         log_type: str = "bot",
-        level: str = None,
+        level: str = "all",
         user: discord.Member = None,
+        lines: app_commands.Range[int, 5, 200] = 30,
     ):
         await interaction.response.defer(ephemeral=True)
 
         log_type = log_type.lower()
 
         if log_type == "bot":
-            logs = fetch_bot_logs(level=level, lines=30)
+            level_filter = level if level != "all" else None
+            logs = fetch_bot_logs(level=level_filter, lines=lines)
             if not logs:
                 return await interaction.followup.send("No bot logs found.", ephemeral=True)
             content = "".join(logs)[-3800:]
             embed = discord.Embed(
-                title=f"Bot Logs ({level or 'all'})",
+                title=f"Bot Logs ({level})",
                 description=f"```{content}```",
                 color=discord.Color.red(),
             )
+            embed.set_footer(text=f"{len(logs)} lines shown")
             return await interaction.followup.send(embed=embed, ephemeral=True)
 
         elif log_type == "user":
@@ -1482,15 +1504,16 @@ class BotCommands(commands.Cog):
             logs = fetch_user_logs(user.id)
             if not logs:
                 return await interaction.followup.send("No user logs found.", ephemeral=True)
-            lines = [
+            log_entries = [
                 f"{x['timestamp']} | {x['command']} | {x['details']}"
-                for x in logs[-20:]
+                for x in logs[-lines:]
             ]
             embed = discord.Embed(
                 title=f"{user.name}'s Command Logs",
-                description=f"```{chr(10).join(lines)[:3800]}```",
+                description=f"```{chr(10).join(log_entries)[:3800]}```",
                 color=discord.Color.blue(),
             )
+            embed.set_footer(text=f"{len(log_entries)} entries shown")
             return await interaction.followup.send(embed=embed, ephemeral=True)
 
         elif log_type == "homework":
@@ -1499,16 +1522,17 @@ class BotCommands(commands.Cog):
             logs = fetch_homework_logs(user.id)
             if not logs:
                 return await interaction.followup.send("No homework logs found.", ephemeral=True)
-            lines = [
+            log_entries = [
                 f"{x['timestamp']} | HW:{x['homework_id']} | {x['task_name']} | "
                 f"{x['completion_pct']}% | XP:{x['xp_gained']}"
-                for x in logs[-20:]
+                for x in logs[-lines:]
             ]
             embed = discord.Embed(
                 title=f"{user.name}'s Homework Logs",
-                description=f"```{chr(10).join(lines)[:3800]}```",
+                description=f"```{chr(10).join(log_entries)[:3800]}```",
                 color=discord.Color.green(),
             )
+            embed.set_footer(text=f"{len(log_entries)} entries shown")
             return await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="reload", description="Reload a cog (owner)")
