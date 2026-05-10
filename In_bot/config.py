@@ -28,6 +28,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Total timestamp = cumulative sum of per-question random values
     "min_seconds_per_question": 5.0,
     "max_seconds_per_question": 8.0,
+    # XP earned per task item (multiplied by vocab count for total score)
+    "xp_per_task": 200,
 }
 
 

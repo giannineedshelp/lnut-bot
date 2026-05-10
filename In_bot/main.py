@@ -10,7 +10,6 @@ import os
 import sys
 from pathlib import Path
 from typing import Optional
-
 import aiohttp
 import discord
 from aiohttp import ClientSession, ClientTimeout

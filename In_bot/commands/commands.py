@@ -1149,8 +1149,6 @@ class BotCommands(commands.Cog):
     # STATUS
     # =========================================================
     @app_commands.command(name="tutorial", description="Show the bot tutorial / user guide")
-    @app_commands.command(name="tutorial", description="Show the bot tutorial / user guide")
-    @app_commands.command(name="tutorial", description="Show the bot tutorial / user guide")
     async def tutorial_cmd(self, interaction: Interaction):
         """Read tutorial.md and display it as a paginated embed."""
         await interaction.response.defer(ephemeral=True)
@@ -1347,6 +1345,94 @@ class BotCommands(commands.Cog):
     @owner_only()
     async def offline_cmd(self, interaction: Interaction):
         await interaction.response.send_message("@everyone BOT IS OFFLINE 🔴")
+    # =========================================================
+    # =========================================================
+    # LEADERBOARD
+    # =========================================================
+    @app_commands.command(name="leaderboard", description="View leaderboard rankings and XP needed for a target rank")
+    @app_commands.describe(
+        lb_type="Leaderboard type: class, school, or world",
+        target_rank="Optional: target rank number to see XP needed to reach it",
+    )
+    @app_commands.choices(lb_type=[
+        app_commands.Choice(name="🏫 Class Ranking", value="class"),
+        app_commands.Choice(name="🏫 School Ranking", value="school"),
+        app_commands.Choice(name="🌍 World Ranking", value="world"),
+    ])
+    async def leaderboard_cmd(self, interaction: Interaction, lb_type: str, target_rank: Optional[int] = None):
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild_id is None:
+            await interaction.followup.send("❌ Guild only.", ephemeral=True)
+            return
+        client = await self._get_api_client(interaction.guild_id)
+        if not client:
+            await interaction.followup.send("❌ Not logged in. Use /login first.", ephemeral=True)
+            return
+        try:
+            data = await client.get_leaderboard(lb_type)
+        except Exception as e:
+            logger.exception("Leaderboard fetch failed")
+            await interaction.followup.send("❌ Failed to fetch leaderboard: " + str(e), ephemeral=True)
+            return
+        if data.get("error"):
+            await interaction.followup.send("❌ API error: " + str(data.get("body", str(data)))[:200], ephemeral=True)
+            return
+        entries = data.get("leaderboard") or data.get("entries") or []
+        my_pos  = data.get("myPosition") or data.get("myRank")
+        my_score = data.get("myScore") or data.get("myPoints") or 0
+        if isinstance(entries, list):
+            parsed = []
+            for item in entries:
+                rank = item.get("rank") or item.get("position") or item.get("place")
+                name = item.get("name") or item.get("displayName") or item.get("username") or "?"
+                xp = item.get("score") or item.get("xp") or item.get("points") or 0
+                if rank:
+                    parsed.append({"rank": int(rank), "name": name, "xp": int(xp)})
+            entries = sorted(parsed, key=lambda e: e["rank"])
+        else:
+            entries = []
+        if not entries and not my_pos:
+            await interaction.followup.send("⚠️ No leaderboard data returned.", ephemeral=True)
+            return
+        type_labels = {"class": "Class", "school": "School", "world": "World"}
+        class_name = data.get("_className", "")
+        title_suffix = (" — " + class_name) if class_name else ""
+        embed = discord.Embed(title="🏆 " + type_labels.get(lb_type, "World") + " Leaderboard" + title_suffix, color=discord.Color.gold())
+        if my_pos:
+            embed.add_field(name="📌 Your Rank", value="**#" + str(my_pos) + "**" + (" — " + str(my_score) + " XP" if my_score else ""), inline=False)
+        if entries:
+            top = entries[:10]
+            lines = []
+            for entry in top:
+                r = entry["rank"]
+                n = entry["name"]
+                x = entry["xp"]
+                if r == 1:
+                    medal = "🥇"
+                elif r == 2:
+                    medal = "🥈"
+                elif r == 3:
+                    medal = "🥉"
+                else:
+                    medal = "#" + str(r)
+                lines.append(medal + " **" + n + "** — " + "{:,}".format(x) + " XP")
+            embed.add_field(name="Top 10", value="\n".join(lines), inline=False)
+        if target_rank is not None and entries:
+            target_entry = next((e for e in entries if e["rank"] == target_rank), None)
+            if target_entry and my_pos is not None:
+                target_xp = target_entry["xp"]
+                diff = target_xp - my_score
+                if diff > 0:
+                    embed.add_field(name="XP Needed for #" + str(target_rank), value=target_entry["name"] + " has " + "{:,}".format(target_xp) + " XP\nYou need " + "{:,}".format(diff) + " more XP to reach rank #" + str(target_rank), inline=False)
+                elif diff <= 0:
+                    embed.add_field(name="Rank #" + str(target_rank), value="You already have enough XP! 🎉", inline=False)
+            elif target_entry:
+                embed.add_field(name="Rank #" + str(target_rank), value=target_entry["name"] + " — " + "{:,}".format(target_entry["xp"]) + " XP", inline=False)
+            else:
+                embed.add_field(name="Rank #" + str(target_rank), value="Rank not found.", inline=False)
+        if not my_pos and not entries:
+            embed.description = "No ranking data available."
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ============================================================
 async def setup(bot: commands.Bot):

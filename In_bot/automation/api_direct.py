@@ -96,6 +96,9 @@ class LNApiClient:
         self.session = session
         self.stealth = stealth_manager
         self.token: str = ""
+        self.account_uid: str = ""
+        self.user_uid: str = ""
+        self.person_name: str = ""
 
     async def call_lnut(self, endpoint: str, params: dict) -> dict:
         """Make a GET request to a LanguageNut API endpoint."""
@@ -118,7 +121,11 @@ class LNApiClient:
                         "body": text[:500],
                     }
                 try:
-                    return json.loads(text)
+                    result = json.loads(text)
+                    new_tok = result.get("newToken")
+                    if new_tok and new_tok != self.token:
+                        self.token = new_tok
+                    return result
                 except json.JSONDecodeError:
                     logger.error(
                         "Invalid JSON from %s: %s", endpoint, text[:200]
@@ -144,7 +151,11 @@ class LNApiClient:
         token = data.get("newToken")
         if token:
             self.token = token
-            logger.info("Login successful")
+            self.account_uid = data.get("accountUid", "")
+            self.user_uid = data.get("uid", "")
+            self.person_name = data.get("personName", "")
+            logger.info("Login successful as %s (uid=%s, account=%s)",
+                        self.person_name, self.user_uid, self.account_uid)
         else:
             logger.error(f"Login failed: {data}")
         return token
@@ -258,6 +269,111 @@ class LNApiClient:
             },
         )
         return data.get("vocabTranslations", []) or []
+
+    # ----- Leaderboard -----
+    async def get_leaderboard(self, lb_type: str = "world") -> dict:
+        """
+        Fetch leaderboard data. The old leaderboardController endpoints are
+        defunct (server-side class removed). Replaced by highscoreController.
+        """
+        if lb_type == "class":
+            return await self._get_class_leaderboard()
+        elif lb_type == "school":
+            return await self._get_school_leaderboard()
+        else:
+            return await self._get_world_leaderboard()
+
+    async def _get_school_leaderboard(self) -> dict:
+        """School-wide leaderboard from highscoreController/studentsAllAccount."""
+        data = await self.call_lnut(
+            "highscoreController/studentsAllAccount",
+            {"token": self.token, "accountUid": self.account_uid},
+        )
+        student_list = data.get("list") or []
+        entries = []
+        my_pos = None
+        my_score = 0
+        for i, student in enumerate(student_list, 1):
+            score = int(student.get("score", 0))
+            entries.append({
+                "rank": i,
+                "name": student.get("name", "?"),
+                "score": score,
+            })
+            if student.get("uid") == self.user_uid:
+                my_pos = i
+                my_score = score
+        return {
+            "leaderboard": entries,
+            "myPosition": my_pos or 0,
+            "myScore": my_score,
+        }
+
+    async def _get_class_leaderboard(self) -> dict:
+        """Find the user's class and return its student leaderboard."""
+        data = await self.call_lnut(
+            "highscoreController/studentsClassAll",
+            {"token": self.token, "accountUid": self.account_uid},
+        )
+        total_list = data.get("totalList") or []
+        my_class = None
+        my_class_name = None
+        for cls in total_list:
+            for student in cls.get("list", []):
+                if student.get("name", "").lower() == self.person_name.lower():
+                    my_class = cls
+                    my_class_name = cls.get("name", "Unknown")
+                    break
+            if my_class:
+                break
+        if not my_class:
+            my_class = total_list[0] if total_list else {"name": "Unknown", "list": []}
+            my_class_name = my_class.get("name", "Unknown")
+        entries = []
+        my_pos = None
+        my_score = 0
+        for i, student in enumerate(my_class.get("list", []), 1):
+            score = int(student.get("score", 0))
+            entries.append({
+                "rank": i,
+                "name": student.get("name", "?"),
+                "score": score,
+            })
+            if student.get("name", "").lower() == self.person_name.lower():
+                my_pos = i
+                my_score = score
+        return {
+            "leaderboard": entries,
+            "myPosition": my_pos or 0,
+            "myScore": my_score,
+            "_className": my_class_name or "Unknown",
+        }
+
+    async def _get_world_leaderboard(self) -> dict:
+        """Global competition leaderboard from highscoreController."""
+        data = await self.call_lnut(
+            "highscoreController/getCompetitionInformationLeaderboard",
+            {"token": self.token},
+        )
+        top_ten = data.get("topTen") or []
+        your_school = data.get("yourSchool") or []
+        if top_ten:
+            entries = []
+            for i, entry in enumerate(top_ten, 1):
+                entries.append({
+                    "rank": i,
+                    "name": entry.get("name", "?"),
+                    "score": int(entry.get("score", 0)),
+                })
+            return {
+                "leaderboard": entries,
+                "myPosition": 0,
+                "myScore": 0,
+                "yourSchool": your_school,
+                "_isCompetition": True,
+            }
+        logger.info("No active competition leaderboard, falling back to school")
+        return await self._get_school_leaderboard()
 
     async def fetch_task_data(
         self,

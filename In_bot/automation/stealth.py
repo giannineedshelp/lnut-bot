@@ -113,6 +113,7 @@ class StealthManager:
             min_s, max_s = max_s, min_s
         self.min_seconds_per_question = max(self.PER_QUESTION_MIN_SEC, min_s)
         self.max_seconds_per_question = min(self.PER_QUESTION_MAX_SEC, max_s)
+        self.speed = max(3.0, float(s.get("speed", 10.0)))
 
     # ------------------------------------------------------------------
     # Timing
