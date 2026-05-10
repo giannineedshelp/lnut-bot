@@ -1,10 +1,9 @@
 """
 Stealth manager - human-like timing and accuracy helpers for LanguageNut submissions.
 
-Supports two timing modes:
-  - Normal mode:     speed = seconds per task (direct value, e.g. 10.0)
-  - Fake-time mode:  speed = 10^fake_time_exponent (mirrors JS slider: speed = 10 ** value)
-                     This allows very large fake timestamps (e.g. years) like the JS UI does.
+Supports one timing mode:
+  - Per-question mode: each question/vocab gets a random time in [min_sec, max_sec]
+                       Total timestamp = cumulative sum of per-question times.
 
 Accuracy range:
   - min_accuracy / max_accuracy (0–100 %)
@@ -67,16 +66,16 @@ class StealthManager:
         Valid range: 0.0–7.0  (7.0 ≈ 3.17 years).
     """
 
-    FAKE_TIME_MIN_EXP = 0.0
-    FAKE_TIME_MAX_EXP = 7.0
+    PER_QUESTION_MIN_SEC = 1.0
+    PER_QUESTION_MAX_SEC = 300.0
 
     def __init__(
         self,
         speed: float = 10.0,
         min_accuracy: int = 85,
         max_accuracy: int = 92,
-        fake_time_enabled: bool = False,
-        fake_time_exponent: float = 4.0,
+        min_seconds_per_question: float = 5.0,
+        max_seconds_per_question: float = 8.0,
     ):
         # Clamp individual values first
         min_accuracy = max(0, min(100, int(min_accuracy)))
@@ -90,11 +89,14 @@ class StealthManager:
         self.min_accuracy = min_accuracy
         self.max_accuracy = max_accuracy
 
-        self.fake_time_enabled  = bool(fake_time_enabled)
-        self.fake_time_exponent = max(
-            self.FAKE_TIME_MIN_EXP,
-            min(self.FAKE_TIME_MAX_EXP, float(fake_time_exponent)),
-        )
+        self.min_seconds_per_question = float(min_seconds_per_question)
+        self.max_seconds_per_question = float(max_seconds_per_question)
+        if self.min_seconds_per_question > self.max_seconds_per_question:
+            self.min_seconds_per_question, self.max_seconds_per_question = (
+                self.max_seconds_per_question, self.min_seconds_per_question
+            )
+        self.min_seconds_per_question = max(self.PER_QUESTION_MIN_SEC, self.min_seconds_per_question)
+        self.max_seconds_per_question = min(self.PER_QUESTION_MAX_SEC, self.max_seconds_per_question)
 
     # ------------------------------------------------------------------
     # Timing
@@ -102,37 +104,29 @@ class StealthManager:
 
     @property
     def effective_speed(self) -> float:
-        """
-        Returns the effective seconds-per-task value.
-        In fake-time mode this mirrors JS: speed = 10 ** exponent.
-        """
-        if self.fake_time_enabled:
-            return 10 ** self.fake_time_exponent
-        return self.speed
+        """Returns average seconds per question."""
+        return (self.min_seconds_per_question + self.max_seconds_per_question) / 2.0
 
-    def compute_timestamp(self) -> int:
+    def compute_timestamp(self, num_questions: int = 1) -> int:
         """
-        Return task completion time in milliseconds with small jitter.
+        Return cumulative per-question completion time in ms.
 
-        Mirrors JS exactly:
-          Math.floor(speed + ((Math.random() - 0.5) / 10) * speed) * 1000
-
-        The jitter is ±5 % of the base speed, keeping the value realistic.
+        Each question gets a random time in [min_seconds_per_question,
+        max_seconds_per_question]. Total = sum of all + small jitter.
         """
-        s      = self.effective_speed
-        jitter = ((random.random() - 0.5) / 10) * s
-        return math.floor(s + jitter) * 1000
+        total_s = 0.0
+        for _ in range(num_questions):
+            total_s += random.uniform(self.min_seconds_per_question, self.max_seconds_per_question)
+        jitter = random.uniform(-0.5, 1.5)
+        return math.floor((total_s + jitter) * 1000)
 
     def fake_time_display(self) -> str:
-        """Human-readable string for the current effective speed."""
-        return seconds_to_human(self.effective_speed)
+        """Human-readable string for per-question range."""
+        return f"{self.min_seconds_per_question}–{self.max_seconds_per_question}s per question"
 
     def speed_display(self) -> str:
-        """
-        Human-readable speed string regardless of mode.
-        Useful for settings embeds.
-        """
-        return seconds_to_human(self.effective_speed)
+        """Human-readable per-question speed string."""
+        return f"{self.min_seconds_per_question}–{self.max_seconds_per_question}s per question"
 
     def delay_between_tasks(self) -> float:
         """
@@ -196,13 +190,8 @@ class StealthManager:
     # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
-        mode = (
-            f"fake_time(exp={self.fake_time_exponent}, "
-            f"≈{self.fake_time_display()})"
-            if self.fake_time_enabled
-            else f"speed={self.speed}s"
-        )
         return (
-            f"<StealthManager {mode} "
+            f"<StealthManager per-question={self.min_seconds_per_question}–"
+            f"{self.max_seconds_per_question}s "
             f"accuracy={self.min_accuracy}%–{self.max_accuracy}%>"
         )

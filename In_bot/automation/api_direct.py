@@ -350,7 +350,7 @@ class LNApiClient:
         score = len(task_data) * 200
 
         # Stealth timestamp (JS: Math.floor(speed + jitter) * 1000)
-        timestamp_ms = self.stealth.compute_timestamp()
+        timestamp_ms = self.stealth.compute_timestamp(len(task_data))
 
         payload = {
             # Core identifiers

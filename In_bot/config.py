@@ -26,8 +26,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "retry_attempts": 2,
     # Fake-time: when enabled, timestamp = 10^fake_time_exponent seconds
     # Mirrors JS slider: speed = 10 ** slider.value
-    "fake_time_enabled": False,
-    "fake_time_exponent": 4.0,   # 10^4 = 10000s (~2.8 hours)
+    # Per-question timing: each vocab gets a random time in this range
+    # Total timestamp = cumulative sum of per-question random values
+    "min_seconds_per_question": 5.0,
+    "max_seconds_per_question": 8.0,
 }
 
 

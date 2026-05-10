@@ -45,25 +45,13 @@ AC_CACHE: dict[int, list[dict]] = {}  # guild_id -> homeworks
 AC_CACHE_TTL = 30.0  # seconds
 AC_CACHE_TIME: dict[int, float] = {}  # guild_id -> fetch timestamp
 
-
 # ============================================================
 # HELPERS
 # ============================================================
 
-
 def _progress_bar(pct: int, length: int = 10) -> str:
     filled = round(max(0, min(100, pct)) / (100 / length))
     return "█" * filled + "░" * (length - filled)
-
-def _validate_seconds(val: str) -> bool:
-    """Check if a seconds value is within valid range (60-10M)."""
-    try:
-        secs = float(val.strip())
-        return 60.0 <= secs <= 10000000.0
-    except (ValueError, TypeError):
-        return False
-
-
 
 # ============================================================
 # OWNER CHECK
@@ -77,7 +65,6 @@ def owner_only():
             return False
         return True
     return app_commands.check(predicate)
-
 
 # ============================================================
 # SAFE SEND HELPER
@@ -104,7 +91,6 @@ async def safe_send(
             await interaction.response.send_message(**kwargs)
     except discord.HTTPException as e:
         logger.error("Send failed: %s", e)
-
 
 # ============================================================
 # SETTINGS PANEL
@@ -138,12 +124,7 @@ class SettingModal(ui.Modal):
     async def on_submit(self, interaction: Interaction):
         raw = self.field.value.strip()
         try:
-            # Convert seconds string to exponent for fake_time_exponent
-            if self.key == "fake_time_exponent" and self.caster is str:
-                seconds = float(raw)
-                value = round(math.log10(max(60.0, seconds)), 2)
-            else:
-                value = self.caster(raw)
+            value = self.caster(raw)
             if not self.validator(value):
                 raise ValueError("Value out of allowed range.")
         except (ValueError, TypeError) as e:
@@ -178,7 +159,6 @@ class SettingModal(ui.Modal):
         embed = self.parent_view.build_embed(interaction.guild_id)
         await interaction.response.edit_message(embed=embed, view=self.parent_view)
 
-
 class SettingsView(ui.View):
     """
     Interactive settings panel.
@@ -193,12 +173,6 @@ class SettingsView(ui.View):
 
     def build_embed(self, guild_id: int) -> discord.Embed:
         s          = config.get_guild_settings(guild_id)
-        fake_exp   = s["fake_time_exponent"]
-        fake_secs  = 10 ** fake_exp
-        fake_str   = seconds_to_human(fake_secs)
-
-        # Real speed display (normal mode)
-        real_speed_str = seconds_to_human(s["speed"])
 
         embed = discord.Embed(
             title="⚙️ LanguageNut Bot Settings",
@@ -209,26 +183,17 @@ class SettingsView(ui.View):
             color=discord.Color.blurple(),
         )
 
-        # ── Timing ────────────────────────────────────────────────────────
+# Per-Question Timing
+        avg_s = (s["min_seconds_per_question"] + s["max_seconds_per_question"]) / 2.0
         embed.add_field(
-            name="⏱️ Speed (sec/task)",
+            name="Time Per Question",
             value=(
-                f"`{s['speed']}s`\n"
-                f"*({real_speed_str})*"
+                f"`{s['min_seconds_per_question']}s` -- `{s['max_seconds_per_question']}s`"
+                f"*avg {avg_s}s/q  (range)*"
             ),
             inline=True,
         )
-        embed.add_field(
-            name="🕰️ Fake Time",
-            value=(
-                f"`{'ON' if s['fake_time_enabled'] else 'OFF'}`  "
-                f"— exponent `{fake_exp}`\n"
-                f"*10^{fake_exp} = {fake_str}*"
-            ),
-            inline=True,
-        )
-        embed.add_field(name="\u200b", value="\u200b", inline=True)  # spacer
-
+        embed.add_field(name="​", value="​", inline=True)
         # ── Accuracy ──────────────────────────────────────────────────────
         acc_bar = _progress_bar(
             round((s["min_accuracy"] + s["max_accuracy"]) / 2), length=10
@@ -275,48 +240,27 @@ class SettingsView(ui.View):
             )
         )
 
-    @ui.button(label="🕰️ Fake Time Exp", style=ButtonStyle.primary, row=0)
-    async def fake_time_exp_btn(self, interaction: Interaction, _: ui.Button):
+    @ui.button(label="Time Per-Q Min", style=ButtonStyle.primary, row=0)
+    async def min_sec_q_btn(self, interaction: Interaction, _: ui.Button):
         s = config.get_guild_settings(interaction.guild_id)
-        exp = s["fake_time_exponent"]
-        current_display = str(round(exp, 2))
         await interaction.response.send_modal(
             SettingModal(
-                "fake_time_exponent",
-                "Fake time exponent (0.0–7.0)  [10^x seconds]",
-                current_display,
-                float,
-                lambda v: 0.0 <= v <= 7.0,
-                self,
+                "min_seconds_per_question", "Min seconds per question (1-300)",
+                s["min_seconds_per_question"], float,
+                lambda v: 1.0 <= v <= 300.0, self,
             )
         )
 
-
-    @ui.button(label="Fantime (sec)", style=ButtonStyle.primary, row=0)
-    async def fake_time_seconds_btn(self, interaction: Interaction, _: ui.Button):
-        """Set fake time directly in seconds instead of exponent."""
+    @ui.button(label="Time Per-Q Max", style=ButtonStyle.primary, row=0)
+    async def max_sec_q_btn(self, interaction: Interaction, _: ui.Button):
         s = config.get_guild_settings(interaction.guild_id)
-        current_secs = str(int(10 ** s["fake_time_exponent"]))
         await interaction.response.send_modal(
             SettingModal(
-                "fake_time_exponent",
-                "Fake time in seconds (60 - 10,000,000)",
-                current_secs,
-                str,
-                _validate_seconds,
-                self,
+                "max_seconds_per_question", "Max seconds per question (1-300)",
+                s["max_seconds_per_question"], float,
+                lambda v: 1.0 <= v <= 300.0, self,
             )
         )
-    @ui.button(label="🕰️ Toggle Fake Time", style=ButtonStyle.secondary, row=0)
-    async def fake_time_toggle_btn(self, interaction: Interaction, _: ui.Button):
-        if interaction.guild_id is None:
-            await safe_send(interaction, "❌ Guild only.")
-            return
-        s = config.get_guild_settings(interaction.guild_id)
-        config.set_guild_setting(interaction.guild_id, "fake_time_enabled", not s["fake_time_enabled"])
-        await interaction.response.edit_message(embed=self.build_embed(interaction.guild_id), view=self)
-
-    # ── Accuracy buttons ──────────────────────────────────────────────────
     @ui.button(label="🎯 Min Accuracy", style=ButtonStyle.primary, row=1)
     async def min_acc_btn(self, interaction: Interaction, _: ui.Button):
         s = config.get_guild_settings(interaction.guild_id)
@@ -389,7 +333,6 @@ class SettingsView(ui.View):
     @ui.button(label="✖ Close", style=ButtonStyle.danger, row=4)
     async def close_btn(self, interaction: Interaction, _: ui.Button):
         await interaction.response.edit_message(content="Settings closed.", embed=None, view=None)
-
 
 # ============================================================
 # HOMEWORK PAGINATOR
@@ -478,7 +421,6 @@ class HomeworkPaginator(ui.View):
     @ui.button(label="✖ Close", style=ButtonStyle.danger)
     async def close_btn(self, interaction: Interaction, _: ui.Button):
         await interaction.response.edit_message(content="Closed.", embed=None, view=None)
-
 
 # ============================================================
 # /do — STEP 1: Homework selector
@@ -576,7 +518,6 @@ class HomeworkSelect(ui.Select):
             content=None, embed=task_view.build_embed(), view=task_view
         )
 
-
 class DoHomeworkView(ui.View):
     def __init__(
         self,
@@ -601,7 +542,6 @@ class DoHomeworkView(ui.View):
     @ui.button(label="✖ Cancel", style=ButtonStyle.danger, row=1)
     async def cancel_btn(self, interaction: Interaction, _: ui.Button):
         await interaction.response.edit_message(content="Cancelled.", embed=None, view=None)
-
 
 # ============================================================
 # /do — STEP 2: Task multi-selector
@@ -684,7 +624,6 @@ class TaskSelect(ui.Select):
             _execute_jobs(interaction.followup, jobs, view.cog, view.guild_id)
         )
 
-
 class DoTaskView(ui.View):
     def __init__(
         self,
@@ -757,7 +696,6 @@ class DoTaskView(ui.View):
     @ui.button(label="✖ Cancel", style=ButtonStyle.danger, row=1)
     async def cancel_btn(self, interaction: Interaction, _: ui.Button):
         await interaction.response.edit_message(content="Cancelled.", embed=None, view=None)
-
 
 # ============================================================
 # SHARED JOB EXECUTOR
@@ -856,9 +794,6 @@ async def _execute_jobs(
         except Exception:
             pass
 
-
-
-
 async def task_autocomplete(
     interaction: Interaction,
     current: str,
@@ -918,11 +853,10 @@ class BotCommands(commands.Cog):
 
         settings = config.get_guild_settings(guild_id)
         stealth  = StealthManager(
-            speed               = settings["speed"],
-            min_accuracy        = settings["min_accuracy"],
-            max_accuracy        = settings["max_accuracy"],
-            fake_time_enabled   = settings["fake_time_enabled"],
-            fake_time_exponent  = settings["fake_time_exponent"],
+            min_accuracy                = settings["min_accuracy"],
+            max_accuracy                = settings["max_accuracy"],
+            min_seconds_per_question    = settings["min_seconds_per_question"],
+            max_seconds_per_question    = settings["max_seconds_per_question"],
         )
         client = LNApiClient(self.bot.aiohttp_session, stealth)
         fernet = self.bot.fernet
@@ -1042,8 +976,8 @@ class BotCommands(commands.Cog):
             speed               = settings["speed"],
             min_accuracy        = settings["min_accuracy"],
             max_accuracy        = settings["max_accuracy"],
-            fake_time_enabled   = settings["fake_time_enabled"],
-            fake_time_exponent  = settings["fake_time_exponent"],
+            min_seconds_per_question    = settings["min_seconds_per_question"],
+            max_seconds_per_question    = settings["max_seconds_per_question"],
         )
         client = LNApiClient(self.bot.aiohttp_session, stealth)
         token  = await client.login(username, password)
@@ -1359,8 +1293,6 @@ class BotCommands(commands.Cog):
     @owner_only()
     async def offline_cmd(self, interaction: Interaction):
         await interaction.response.send_message("@everyone BOT IS OFFLINE 🔴")
-
-
 
 # ============================================================
 async def setup(bot: commands.Bot):
