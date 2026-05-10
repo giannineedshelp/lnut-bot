@@ -1,0 +1,16 @@
+.env
+.env.local
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.vscode/
+logs/
+config.json
+*.md
+structure.txt
+commands_list.txt
+tutorial.md
+

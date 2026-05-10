@@ -31,6 +31,7 @@ from automation.discover import HomeworkDiscoverer
 from automation.stealth import StealthManager, seconds_to_human
 from utils.encryption import decrypt_value, encrypt_value
 from utils.helper import _pct, _is_done
+from utils.logger import log_user_command, log_homework_action, fetch_user_logs, fetch_homework_logs, fetch_bot_logs
 
 logger = logging.getLogger("lnut_bot.commands")
 
@@ -499,7 +500,7 @@ class HomeworkSelect(ui.Select):
                 view=None,
             )
             asyncio.create_task(
-                _execute_jobs(interaction.followup, jobs, view.cog, view.guild_id)
+                _execute_jobs(interaction.followup, jobs, view.cog, view.guild_id, user_id=view.user_id)
             )
             return
 
@@ -621,7 +622,7 @@ class TaskSelect(ui.Select):
             view=None,
         )
         asyncio.create_task(
-            _execute_jobs(interaction.followup, jobs, view.cog, view.guild_id)
+            _execute_jobs(interaction.followup, jobs, view.cog, view.guild_id, user_id=view.user_id)
         )
 
 class DoTaskView(ui.View):
@@ -866,12 +867,14 @@ async def _execute_jobs(
     jobs: list[tuple[dict, dict]],
     cog: "BotCommands",
     guild_id: int,
+    user_id: int = 0,
 ) -> None:
     """
     Run (homework, task) jobs concurrently and post a result embed via followup.
 
     Uses an asyncio Semaphore to cap concurrency at the guild's setting,
     mirroring the JS asyncPool(funcs, 5) pattern.
+    If user_id is provided, homework completion is logged to user analytics.
     """
     client = await cog._get_api_client(guild_id)
     if not client:
@@ -931,6 +934,20 @@ async def _execute_jobs(
     results = await asyncio.gather(*(run_one(hw, t) for hw, t in jobs))
     ok  = [r for r in results if r[2]]
     bad = [r for r in results if not r[2]]
+
+    # Log homework results for analytics
+    if user_id and jobs:
+        for (hw, t_obj), (hw_name, task_name, success, err) in zip(jobs, results):
+            hw_id = hw.get("id", "?")
+            pct = 100 if success else 0
+            log_homework_action(
+                user_id=user_id,
+                homework_id=str(hw_id),
+                task_name=task_name,
+                completion_pct=pct,
+                duration=0,
+                xp_gained=10 if success else 0,
+            )
 
     embed = discord.Embed(
         title="✅ Task Results" if not bad else "⚠️ Task Results",
@@ -1160,6 +1177,7 @@ class BotCommands(commands.Cog):
         )
         self._hw_cache.pop(interaction.guild_id, None)
         logger.info("User logged in for guild %s", interaction.guild_id)
+        log_user_command(interaction.user.id, "/login", f"Guild {interaction.guild_id}")
         await interaction.followup.send(
             "✅ Login successful! Credentials stored securely.\nUse `/homework` to view assignments.",
             ephemeral=True,
@@ -1251,7 +1269,7 @@ class BotCommands(commands.Cog):
             return
         await interaction.followup.send("Starting **" + str(len(jobs)) + "** task(s)...", ephemeral=True)
         asyncio.create_task(
-            _execute_jobs(interaction.followup, jobs, self, interaction.guild_id)
+            _execute_jobs(interaction.followup, jobs, self, interaction.guild_id, user_id=interaction.user.id)
         )
 
     @app_commands.command(name="do", description="Complete homework tasks using an interactive selector")
@@ -1292,6 +1310,11 @@ class BotCommands(commands.Cog):
             color=discord.Color.blue(),
         )
         embed.set_footer(text="Only incomplete tasks (< 100%) are shown.")
+        log_user_command(
+            interaction.user.id,
+            "/do",
+            f"Started homework selector with {len(incomplete_hws)} assignments",
+        )
         view = DoHomeworkView(incomplete_hws, self, interaction.guild_id, interaction.user.id)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
@@ -1610,23 +1633,75 @@ class BotCommands(commands.Cog):
         except discord.Forbidden:
             await interaction.followup.send("❌ I don't have permission to delete messages.", ephemeral=True)
 
-    @app_commands.command(name="logs", description="Show last 20 log lines (owner)")
+    @app_commands.command(name="logs", description="View bot, user, or homework logs (owner)")
     @owner_only()
-    async def logs_cmd(self, interaction: Interaction):
-        log_paths = ["logs/bot.log", "bot.log"]
-        log_file  = next((p for p in log_paths if os.path.exists(p)), None)
-        if not log_file:
-            await safe_send(interaction, "❌ No log file found.")
-            return
-        try:
-            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-                lines   = f.readlines()[-20:]
-            content = "".join(lines)
-            if len(content) > 1800:
-                content = content[-1800:]
-            await safe_send(interaction, f"```{content}```")
-        except OSError as e:
-            await safe_send(interaction, f"❌ Read failed: {e}")
+    @app_commands.describe(
+        log_type="bot / user / homework",
+        level="debug/info/warning/error (bot type)",
+        user="Target user (required for user/homework types)",
+    )
+    @app_commands.choices(log_type=[
+        app_commands.Choice(name="Bot Console Logs", value="bot"),
+        app_commands.Choice(name="User Command History", value="user"),
+        app_commands.Choice(name="Homework Results", value="homework"),
+    ])
+    async def logs_cmd(
+        self,
+        interaction: Interaction,
+        log_type: str = "bot",
+        level: str = None,
+        user: discord.Member = None,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        log_type = log_type.lower()
+
+        if log_type == "bot":
+            logs = fetch_bot_logs(level=level, lines=30)
+            if not logs:
+                return await interaction.followup.send("No bot logs found.", ephemeral=True)
+            content = "".join(logs)[-3800:]
+            embed = discord.Embed(
+                title=f"Bot Logs ({level or 'all'})",
+                description=f"```{content}```",
+                color=discord.Color.red(),
+            )
+            return await interaction.followup.send(embed=embed, ephemeral=True)
+
+        elif log_type == "user":
+            if not user:
+                return await interaction.followup.send("Provide a user with the `user` parameter.", ephemeral=True)
+            logs = fetch_user_logs(user.id)
+            if not logs:
+                return await interaction.followup.send("No user logs found.", ephemeral=True)
+            lines = [
+                f"{x['timestamp']} | {x['command']} | {x['details']}"
+                for x in logs[-20:]
+            ]
+            embed = discord.Embed(
+                title=f"{user.name}'s Command Logs",
+                description=f"```{chr(10).join(lines)[:3800]}```",
+                color=discord.Color.blue(),
+            )
+            return await interaction.followup.send(embed=embed, ephemeral=True)
+
+        elif log_type == "homework":
+            if not user:
+                return await interaction.followup.send("Provide a user with the `user` parameter.", ephemeral=True)
+            logs = fetch_homework_logs(user.id)
+            if not logs:
+                return await interaction.followup.send("No homework logs found.", ephemeral=True)
+            lines = [
+                f"{x['timestamp']} | HW:{x['homework_id']} | {x['task_name']} | "
+                f"{x['completion_pct']}% | XP:{x['xp_gained']}"
+                for x in logs[-20:]
+            ]
+            embed = discord.Embed(
+                title=f"{user.name}'s Homework Logs",
+                description=f"```{chr(10).join(lines)[:3800]}```",
+                color=discord.Color.green(),
+            )
+            return await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="reload", description="Reload a cog (owner)")
     @owner_only()

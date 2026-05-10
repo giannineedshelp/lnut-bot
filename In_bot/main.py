@@ -46,13 +46,21 @@ print("TOKEN LOADED:", bool(TOKEN))
 # =========================
 # LOCAL IMPORTS
 # =========================
-from utils.logger import setup_logging
+from utils.logger import setup_logging, log_user_command
 from utils.encryption import get_fernet
 
 logger = setup_logging()
 
 raw_guild_id = os.getenv("GUILD_ID", "").strip()
 GUILD_ID: Optional[int] = int(raw_guild_id) if raw_guild_id else None
+
+ANNOUNCE_CHANNEL_ID: Optional[int] = None
+raw_channel = os.getenv("ANNOUNCE_CHANNEL_ID", "").strip()
+if raw_channel:
+    try:
+        ANNOUNCE_CHANNEL_ID = int(raw_channel)
+    except ValueError:
+        pass
 
 
 # =========================
@@ -77,7 +85,6 @@ class LanguageNutBot(commands.Bot):
         self.fernet = get_fernet()
 
     async def setup_hook(self):
-        # Shared HTTP session with sensible timeout and connection pooling
         connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
         self.aiohttp_session = ClientSession(
             timeout=ClientTimeout(total=30, connect=10),
@@ -90,12 +97,9 @@ class LanguageNutBot(commands.Bot):
 
         await self._load_cogs()
 
-        # Sync ONCE — guild-scoped if GUILD_ID set (instant), otherwise global (up to 1 hr)
         try:
             if GUILD_ID:
                 guild_obj = discord.Object(id=GUILD_ID)
-                # App commands in this cog are declared globally, so copy them into
-                # the dev guild before a guild-scoped sync.
                 self.tree.copy_global_to(guild=guild_obj)
                 synced = await self.tree.sync(guild=guild_obj)
                 logger.info(f"Synced {len(synced)} commands to guild {GUILD_ID}")
@@ -105,7 +109,6 @@ class LanguageNutBot(commands.Bot):
         except Exception as e:
             logger.error(f"Command sync failed: {e}")
 
-        # Global error handler for slash commands
         self.tree.error(self.on_tree_error)
         logger.info("Setup complete")
 
@@ -123,6 +126,30 @@ class LanguageNutBot(commands.Bot):
         if self.user:
             logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
         logger.info("Bot is online")
+        logger.info("Logging systems initialized successfully")
+        await self._announce_online()
+
+    async def _announce_online(self):
+        channel_id = ANNOUNCE_CHANNEL_ID
+        if not channel_id:
+            for guild in self.guilds:
+                if guild.system_channel:
+                    channel_id = guild.system_channel.id
+                    break
+        if channel_id:
+            channel = self.get_channel(channel_id)
+            if channel and isinstance(channel, discord.TextChannel):
+                try:
+                    await channel.send("@everyone BOT IS ONLINE \U0001F7E2")
+                    logger.info(f"Online announcement sent to #{channel.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to send online announcement: {e}")
+
+    async def on_disconnect(self):
+        logger.warning("Bot disconnected from Discord gateway")
+
+    async def on_resumed(self):
+        logger.info("Bot reconnected to Discord gateway")
 
     async def on_tree_error(
         self, interaction: discord.Interaction, error: Exception
@@ -130,7 +157,7 @@ class LanguageNutBot(commands.Bot):
         orig = getattr(error, "original", error)
         logger.exception(f"Slash command error: {orig}")
 
-        msg = f"⚠️ Error:\n```{str(orig)[:1500]}```"
+        msg = f"\u26a0\ufe0f Error:\n```{str(orig)[:1500]}```"
 
         try:
             if interaction.response.is_done():
@@ -139,6 +166,16 @@ class LanguageNutBot(commands.Bot):
                 await interaction.response.send_message(msg, ephemeral=True)
         except Exception as exc:
             logger.error(f"Failed to send error message: {exc}")
+
+    async def on_app_command_completion(self, interaction: discord.Interaction, command):
+        try:
+            log_user_command(
+                interaction.user.id,
+                f"/{command.name}",
+                f"Executed in guild {interaction.guild_id}",
+            )
+        except Exception as e:
+            logger.warning(f"Failed command logging: {e}")
 
     async def close(self):
         if self.aiohttp_session is not None and not self.aiohttp_session.closed:

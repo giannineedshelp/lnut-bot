@@ -6,13 +6,19 @@ Handles per-guild account credentials + automation settings with safe I/O.
 
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("lnut_bot.config")
 
-CONFIG_PATH = Path("config.json")
+# Allow config path to be overridden via env (used by Docker / Fly.io for persistent volume)
+_config_dir = os.getenv("CONFIG_DIR", "")
+if _config_dir:
+    CONFIG_PATH = Path(_config_dir) / "config.json"
+else:
+    CONFIG_PATH = Path("config.json")
 
 _LOCK = threading.Lock()
 
@@ -146,3 +152,4 @@ def reset_guild_settings(guild_id: int) -> None:
     if str(guild_id) in config.get("guild_settings", {}):
         del config["guild_settings"][str(guild_id)]
         save_config(config)
+
