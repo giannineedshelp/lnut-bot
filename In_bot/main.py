@@ -27,15 +27,60 @@ sys.path.insert(0, str(FILE_DIR))
 print("Running from:", os.getcwd())
 
 # =========================
+# PHONE PATH SUPPORT
+# =========================
+# Android internal storage can be at different mount points depending on device/app
+PHONE_BASE_PATHS = [
+    Path("/sdcard/Documents/lnut-bot/In_bot"),
+    Path("/storage/emulated/0/Documents/lnut-bot/In_bot"),
+    Path("/storage/self/primary/Documents/lnut-bot/In_bot"),
+]
+
+def resolve_project_root() -> Path:
+    """
+    Returns the project root to use for loading .env and resolving paths.
+    Prefers the actual script location, but falls back to known phone paths
+    if the script is being run from a non-standard location (e.g. Termux on Android).
+    """
+    # If the script itself lives inside one of the known phone paths, use that
+    for phone_path in PHONE_BASE_PATHS:
+        if phone_path.exists() and FILE_DIR == phone_path:
+            print(f"Phone project root detected: {phone_path}")
+            return phone_path
+
+    # Check if any phone path exists and the script dir looks like a temp/unknown location
+    for phone_path in PHONE_BASE_PATHS:
+        if phone_path.exists():
+            print(f"Phone project root found: {phone_path}")
+            return phone_path
+
+    # Default: use the script's own directory (standard PC behaviour)
+    return FILE_DIR
+
+PROJECT_ROOT = resolve_project_root()
+sys.path.insert(0, str(PROJECT_ROOT))
+os.chdir(str(PROJECT_ROOT))
+
+print("Project root:", PROJECT_ROOT)
+
+# =========================
 # ENV
 # =========================
-ENV_PATHS = [FILE_DIR / ".env", FILE_DIR.parent / ".env"]
+ENV_PATHS = [
+    FILE_DIR / ".env",
+    FILE_DIR.parent / ".env",
+    PROJECT_ROOT / ".env",
+    PROJECT_ROOT.parent / ".env",
+]
 ENV_PATH = next((p for p in ENV_PATHS if p.exists()), None)
 
 if not ENV_PATH:
-    raise RuntimeError(".env not found")
+    raise RuntimeError(
+        ".env not found. Searched:\n" + "\n".join(str(p) for p in ENV_PATHS)
+    )
 
 load_dotenv(ENV_PATH, override=True)
+print(f".env loaded from: {ENV_PATH}")
 
 TOKEN: str = os.getenv("DISCORD_TOKEN", "")
 
@@ -219,5 +264,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.getLogger("lnut_bot").info("Shutdown requested")
-
-
