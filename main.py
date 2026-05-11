@@ -34,20 +34,40 @@ sys.path.insert(0, str(FILE_DIR))
 print("Running from:", os.getcwd())
 
 # =========================
-# ENV
+# ENV - Search multiple locations for .env
 # =========================
-ENV_PATHS = [FILE_DIR / ".env", FILE_DIR.parent / ".env"]
+# Check: same dir, parent dir, grandparent dir, user home, Documents/In_bot
+ENV_PATHS = [
+    FILE_DIR / ".env",
+    FILE_DIR.parent / ".env",
+    FILE_DIR.parent.parent / ".env",
+    Path.home() / "Documents" / "In_bot" / ".env",
+    Path.home() / "Documents" / "In_bot" / "In_bot" / ".env",
+    Path.home() / ".env",
+]
 ENV_PATH = next((p for p in ENV_PATHS if p.exists()), None)
 
 if not ENV_PATH:
-    raise RuntimeError(".env not found")
+    print("ERROR: .env file not found!")
+    print("Create a .env file in one of these locations:")
+    for p in ENV_PATHS:
+        print(f"  - {p}")
+    print()
+    print("Example .env content:")
+    print("  DISCORD_TOKEN=your_bot_token_here")
+    print("  GUILD_ID=your_server_id_here")
+    sys.exit(1)
 
+print("Using .env:", ENV_PATH)
 load_dotenv(ENV_PATH, override=True)
 
 TOKEN: str = os.getenv("DISCORD_TOKEN", "")
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN missing")
+    print("ERROR: DISCORD_TOKEN not found in .env file!")
+    print(f"Make sure your .env at {ENV_PATH} contains:")
+    print('  DISCORD_TOKEN=your_actual_bot_token')
+    sys.exit(1)
 
 print("TOKEN LOADED:", bool(TOKEN))
 
@@ -181,7 +201,7 @@ class LanguageNutBot(commands.Bot):
                 return
             msg = "This command can only be used in a server."
         else:
-            msg = f"⚠️ Error:\n```{str(orig)[:1500]}```"
+            msg = f"Error:\n```{str(orig)[:1500]}```"
 
         # Try to send the error message without cascading
         try:
@@ -202,31 +222,4 @@ class LanguageNutBot(commands.Bot):
                 try:
                     await interaction.followup.send(msg, ephemeral=True)
                 except Exception as e2:
-                    logger.error(f"Error handler followup also failed: {e2}")
-            else:
-                logger.error(f"Failed to send error message: {exc}")
-        except Exception as exc:
-            logger.error(f"Failed to send error message: {exc}")
-
-    async def close(self):
-        if self.aiohttp_session is not None and not self.aiohttp_session.closed:
-            await self.aiohttp_session.close()
-        await super().close()
-
-
-# =========================
-# MAIN
-# =========================
-async def main():
-    bot = LanguageNutBot()
-    try:
-        await bot.start(TOKEN)
-    except Exception as e:
-        logger.exception(f"Exception during bot startup: {e}")
-        raise
-    finally:
-        await bot.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+                    log
