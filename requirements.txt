@@ -1,0 +1,5 @@
+discord.py==2.4.0
+python-dotenv==1.1.0
+cryptography==44.0.2
+aiohttp==3.10.10
+

@@ -1,0 +1,2 @@
+"""LanguageNut Discord Bot."""
+

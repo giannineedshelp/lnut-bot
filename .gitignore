@@ -1,0 +1,33 @@
+# Environment
+.env
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp / Generated
+phone_setup.md
+tutorial.md
+commands_list.txt
+structure.txt
+fly.toml
+Dockerfile
