@@ -159,7 +159,7 @@ class LanguageNutBot(commands.Bot):
         logger.info("Setup complete")
 
     async def _load_cogs(self):
-        cogs: list[str] = ["commands.commands"]
+        cogs: list[str] = ["commands.commands", "commands.xp_commands"]
 
         for cog in cogs:
             try:
@@ -238,29 +238,3 @@ class LanguageNutBot(commands.Bot):
         except Exception as e:
             logger.warning(f"Failed command logging: {e}")
 
-    async def close(self):
-        await self._announce_offline()
-        if self.aiohttp_session is not None and not self.aiohttp_session.closed:
-            await self.aiohttp_session.close()
-        await super().close()
-
-
-# =========================
-# MAIN
-# =========================
-async def main():
-    bot = LanguageNutBot()
-    try:
-        await bot.start(TOKEN)
-    except Exception as e:
-        logger.exception(f"Exception during bot startup: {e}")
-        raise
-    finally:
-        await bot.close()
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.getLogger("lnut_bot").info("Shutdown requested")

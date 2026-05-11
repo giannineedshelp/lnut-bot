@@ -31,7 +31,7 @@ from automation.discover import HomeworkDiscoverer
 from automation.stealth import StealthManager, seconds_to_human
 from utils.encryption import decrypt_value, encrypt_value
 from utils.helper import _pct, _is_done
-from utils.logger import log_user_command, log_homework_action, fetch_user_logs, fetch_homework_logs, fetch_bot_logs
+from utils.logger import log_user_command, log_homework_action, fetch_user_logs, fetch_homework_logs, fetch_bot_logs, get_user_usage_count
 
 logger = logging.getLogger("lnut_bot.commands")
 
@@ -814,7 +814,7 @@ async def _execute_jobs(
         color=discord.Color.green() if not bad else discord.Color.orange(),
     )
     if ok:
-        lines = [f"✅ **{name}** *(in {hw[:30]})*" for hw, name, _, _ in ok[:15]]
+        lines = [f"✅ **{name}** *(in {hw_name[:30]})*" for hw, name, _, _ in ok[:15]]
         if len(ok) > 15:
             lines.append(f"*…and {len(ok) - 15} more ✅*")
         embed.add_field(name=f"✅ Completed ({len(ok)})", value="\n".join(lines), inline=False)
@@ -1239,6 +1239,7 @@ class BotCommands(commands.Cog):
 
     @app_commands.command(name="status", description="Show bot status")
     async def status_cmd(self, interaction: Interaction):
+        await interaction.response.defer(ephemeral=True)
         embed = discord.Embed(
             title="🤖 Bot Status",
             color=discord.Color.green(),
@@ -1262,7 +1263,7 @@ class BotCommands(commands.Cog):
         if interaction.guild_id is not None:
             acct = config.get_account(interaction.guild_id)
             embed.add_field(name="Logged in", value="✅" if acct else "❌", inline=True)
-        await safe_send(interaction, embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="leaderboard", description="View the LanguageNut leaderboard")
     @app_commands.describe(
@@ -1272,7 +1273,7 @@ class BotCommands(commands.Cog):
     @app_commands.choices(ltype=[
         app_commands.Choice(name="Class Leaderboard", value="class"),
         app_commands.Choice(name="School Leaderboard", value="school"),
-        app_commands.Choice(name="Global Leaderboard", value="global"),
+        app_commands.Choice(name="Global (Rank Worldwide)", value="global"),
     ])
     async def leaderboard_cmd(self, interaction: Interaction, ltype: str, position: app_commands.Range[int, 1, 50] = 10):
         """Display leaderboard rankings from LanguageNut."""
@@ -1289,105 +1290,91 @@ class BotCommands(commands.Cog):
         try:
             if ltype == "class":
                 data = await client.get_class_leaderboard()
-                if not data:
+                if not data or not data.get("leaderboard"):
                     await interaction.followup.send("No class data found.", ephemeral=True)
                     return
 
+                entries = data["leaderboard"]
+                my_pos = data.get("myPosition", 0)
+                my_score = data.get("myScore", 0)
+                cls_name = data.get("_className", "Your Class")
+
                 embed = discord.Embed(
-                    title="Class Leaderboard",
-                    description="Top classes by student scores",
+                    title=chr(0x1F393) + " " + cls_name + " Leaderboard",
+                    description=f"Your Rank: **#{my_pos}** | Score: **{my_score:,}** pts" if my_pos else "Class rankings",
                     color=discord.Color.blue(),
                 )
 
-                sorted_classes = sorted(
-                    data,
-                    key=lambda c: max(int(s.get("score", 0)) for s in c.get("list", [])) if c.get("list") else 0,
-                    reverse=True,
-                )
-
-                for i, cls in enumerate(sorted_classes[:position], 1):
-                    cls_name = cls.get("name", "Unknown Class")
-                    students = cls.get("list", [])
-                    top_score = max(int(s.get("score", 0)) for s in students) if students else 0
-                    total_students = len(students)
-                    medal = chr(0x1F947) if i == 1 else (chr(0x1F948) if i == 2 else (chr(0x1F949) if i == 3 else f"`#{i}`"))
+                for i, s in enumerate(entries[:position]):
+                    rank_emoji = chr(0x1F947) if i == 0 else (chr(0x1F948) if i == 1 else (chr(0x1F949) if i == 2 else f"‎"))
                     embed.add_field(
-                        name=f"{medal} {cls_name[:100]}",
-                        value=f"Students: {total_students} | Top score: **{top_score:,}**",
-                        inline=False,
+                        name=f"{rank_emoji} {s[chr(39) + chr(110) + chr(97) + chr(109) + chr(101) + chr(39)][:80]}",
+                        value=f"{s[chr(39) + chr(115) + chr(99) + chr(111) + chr(114) + chr(101) + chr(39)]:,} pts",
+                        inline=True,
                     )
-
-                embed.set_footer(text=f"Showing top {min(position, len(sorted_classes))} classes")
+                embed.set_footer(text=f"Showing {min(position, len(entries))}/{len(entries)} students in {cls_name}")
 
             elif ltype == "school":
                 data = await client.get_school_leaderboard()
-                if not data:
+                if not data or not data.get("leaderboard"):
                     await interaction.followup.send("No school leaderboard data found.", ephemeral=True)
                     return
 
+                entries = data["leaderboard"]
+                total = len(entries)
+                my_pos = data.get("myPosition", 0)
+                my_score = data.get("myScore", 0)
+
                 embed = discord.Embed(
-                    title="School Leaderboard",
-                    description="All students in your school ranked by score",
+                    title=chr(0x1F3EB) + " School Leaderboard",
+                    description=f"**{total}** students enrolled" + (f" | Your rank: **#{my_pos}** ({my_score:,} pts)" if my_pos else ""),
                     color=discord.Color.green(),
                 )
 
-                sorted_students = sorted(data, key=lambda s: int(s.get("score", 0)), reverse=True)
-                total = len(sorted_students)
-                user_rank = None
-                for idx_s, s in enumerate(sorted_students):
-                    if s.get("isUser") == "1":
-                        user_rank = idx_s + 1
-                        break
-
-                desc_lines = [f"Total students: **{total}**"]
-                if user_rank:
-                    desc_lines.append(f"Your rank: **#{user_rank}**")
-                embed.description = chr(10).join(desc_lines)
-
-                top_n = min(position, len(sorted_students))
+                top_n = min(position, len(entries))
                 lines = []
                 for i in range(top_n):
-                    s = sorted_students[i]
-                    name = s.get("name", "Unknown")
-                    score = int(s.get("score", 0))
-                    medal = chr(0x1F947) if i == 0 else (chr(0x1F948) if i == 1 else (chr(0x1F949) if i == 2 else f"`#{i+1}`"))
-                    lines.append(f"{medal} **{name}** -- {score:,} pts")
+                    s = entries[i]
+                    rank_emoji = chr(0x1F947) if i == 0 else (chr(0x1F948) if i == 1 else (chr(0x1F949) if i == 2 else f"‎"))
+                    lines.append(f"{rank_emoji} **{s[chr(39) + chr(110) + chr(97) + chr(109) + chr(101) + chr(39)][:50]}** -- {s[chr(39) + chr(115) + chr(99) + chr(111) + chr(114) + chr(101) + chr(39)]:,} pts")
 
-                embed.add_field(name=f"Top {top_n}", value=chr(10).join(lines), inline=False)
+                embed.add_field(name=chr(0x1F3C6) + " Top " + str(top_n), value=chr(10).join(lines), inline=False)
 
-                if user_rank and user_rank > top_n:
-                    u = sorted_students[user_rank - 1]
-                    embed.add_field(name="Your Position", value=f"#{user_rank} -- **{u.get('name', 'You')}** ({int(u.get('score', 0)):,} pts)", inline=False)
+                if my_pos and my_pos > top_n:
+                    my_entry = entries[my_pos - 1]
+                    embed.add_field(name=chr(0x1F464) + " Your Position", value=f"#{my_pos} -- {my_entry[chr(39) + chr(110) + chr(97) + chr(109) + chr(101) + chr(39)]} ({my_entry[chr(39) + chr(115) + chr(99) + chr(111) + chr(114) + chr(101) + chr(39)]:,} pts)", inline=False)
 
             elif ltype == "global":
-                data = await client.get_school_rankings()
-                if not data:
-                    await interaction.followup.send("No global leaderboard data found.", ephemeral=True)
-                    return
+                data = await client.get_world_leaderboard()
+                entries = data.get("leaderboard", [])
+                your_school = data.get("yourSchool", [])
 
                 embed = discord.Embed(
-                    title="Global School Rankings",
-                    description="Top schools worldwide by total score",
+                    title=chr(0x1F30D) + " Global School Rankings",
+                    description="Top schools worldwide by competition score",
                     color=discord.Color.purple(),
                 )
 
-                sorted_schools = sorted(data, key=lambda s: int(s.get("score", 0)), reverse=True)
-                top_n = min(position, len(sorted_schools))
+                if entries:
+                    top_n = min(position, len(entries))
+                    lines = []
+                    for i, s in enumerate(entries[:top_n]):
+                        rank_emoji = chr(0x1F947) if i == 0 else (chr(0x1F948) if i == 1 else (chr(0x1F949) if i == 2 else f"‎"))
+                        lines.append(f"{rank_emoji} **{s[chr(39) + chr(110) + chr(97) + chr(109) + chr(101) + chr(39)][:60]}** -- {s[chr(39) + chr(115) + chr(99) + chr(111) + chr(114) + chr(101) + chr(39)]:,} pts")
+                    embed.add_field(name=chr(0x1F30D) + " Top " + str(top_n) + " Schools", value=chr(10).join(lines), inline=False)
 
-                lines = []
-                for i in range(top_n):
-                    s = sorted_schools[i]
-                    name = s.get("name", "Unknown School")
-                    score = int(s.get("score", 0))
-                    rank = s.get("rank", str(i + 1))
-                    medal = chr(0x1F947) if i == 0 else (chr(0x1F948) if i == 1 else (chr(0x1F949) if i == 2 else f"`#{rank}`"))
-                    lines.append(f"{medal} **{name[:60]}** -- {score:,} pts")
-
-                embed.add_field(name=f"Top {top_n} Schools", value=chr(10).join(lines), inline=False)
-
-                user_school = next((s for s in sorted_schools if "Saint Ambrose" in s.get("name", "")), None)
-                if user_school:
-                    embed.set_footer(text=f"Your school rank: #{user_school.get('rank', '?')} worldwide")
+                if your_school:
+                    school_name = your_school.get("name") or your_school.get("school", "Your School")
+                    school_score = int(your_school.get("score", 0))
+                    school_rank = your_school.get("rank", "?")
+                    embed.add_field(
+                        name=chr(0x1F3EB) + " " + school_name[:60],
+                        value=f"World Rank: **#{school_rank}** | Score: **{school_score:,}**",
+                        inline=False,
+                    )
+                    embed.set_footer(text=f"Your school is ranked #{school_rank} worldwide")
+                else:
+                    embed.set_footer(text="Competition rankings - top schools worldwide")
 
             else:
                 await interaction.followup.send(f"Unknown leaderboard type: {ltype}", ephemeral=True)
@@ -1528,12 +1515,13 @@ class BotCommands(commands.Cog):
                 f"{x['timestamp']} | {x['command']} | {x['details']}"
                 for x in logs[-lines:]
             ]
+            usage_count = get_user_usage_count(user.id)
             embed = discord.Embed(
-                title=f"{user.name}'s Command Logs",
+                title=f"{user.name}'s Command Logs ({usage_count} total)",
                 description=f"```{chr(10).join(log_entries)[:3800]}```",
                 color=discord.Color.blue(),
             )
-            embed.set_footer(text=f"{len(log_entries)} entries shown")
+            embed.set_footer(text=f"{len(log_entries)} entries shown | {usage_count} total commands used")
             return await interaction.followup.send(embed=embed, ephemeral=True)
 
         elif log_type == "homework":
@@ -1547,12 +1535,14 @@ class BotCommands(commands.Cog):
                 f"{x['completion_pct']}% | XP:{x['xp_gained']}"
                 for x in logs[-lines:]
             ]
+            total_xp = sum(x.get('xp_gained', 0) for x in logs)
+            usage_count = get_user_usage_count(user.id)
             embed = discord.Embed(
                 title=f"{user.name}'s Homework Logs",
                 description=f"```{chr(10).join(log_entries)[:3800]}```",
                 color=discord.Color.green(),
             )
-            embed.set_footer(text=f"{len(log_entries)} entries shown")
+            embed.set_footer(text=f"{len(log_entries)} entries shown | {total_xp:,} total XP | {usage_count} commands")
             return await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="reload", description="Reload a cog (owner)")
@@ -1638,7 +1628,7 @@ class BotCommands(commands.Cog):
             roles = [r.mention for r in user.roles[1:]]
             if roles:
                 embed.add_field(name=f"Roles ({len(roles)})", value=", ".join(roles[:5]) + (f" +{len(roles)-5}" if len(roles) > 5 else ""), inline=False)
-        await safe_send(interaction, embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="serverinfo", description="Show info about this server (owner)")
     @owner_only()
@@ -1661,7 +1651,7 @@ class BotCommands(commands.Cog):
         embed.add_field(name="Roles", value=len(guild.roles), inline=True)
         embed.add_field(name="Boosts", value=guild.premium_subscription_count, inline=True)
         embed.add_field(name="Created", value=discord.utils.format_dt(guild.created_at, style="R"), inline=True)
-        await safe_send(interaction, embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="dm", description="DM a user (owner)")
     @owner_only()

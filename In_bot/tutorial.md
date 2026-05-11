@@ -1,159 +1,101 @@
-# LanguageNut Discord Bot — User Guide
+# LanguageNut Bot — Server Usage Guide
 
 ## What is this?
 
-A Discord bot that automates LanguageNut homework assignments. It submits realistic per-vocab timing and accuracy to avoid detection.
+A Discord bot that automates LanguageNut homework on **this server**. It completes assignments with realistic timing and accuracy so you don't have to do them manually.
 
-## Setup
+## Quick Start
 
-### Requirements
-- Python 3.10+
-- discord.py 2.4.0, aiohttp, python-dotenv, cryptography
+1. **`/login`** — Enter your LanguageNut username and password (stored encrypted, only you can use)
+2. **`/homework`** — View all pending assignments
+3. **`/do`** — Select tasks to complete, or use `/quick-do` for fast task selection
 
-### Quick Start
-1. `pip install -r requirements.txt`
-2. Create `.env` in the `In_bot` folder (see example below)
-3. `python main.py`
+That's it. The bot handles everything else.
 
-### .env File
-```
-DISCORD_TOKEN=your_bot_token_here
-ENCRYPTION_KEY=your_32byte_base64_key_here
-GUILD_ID=your_discord_server_id
-OWNER_ID=your_discord_user_id
-HEADLESS=true
-LOG_LEVEL=INFO
-```
-
-> **Note:** The bot auto-detects `.env` in both `In_bot/` and the parent directory.
-
-## Commands
+## Available Commands
 
 ### User Commands
 
 | Command | Description |
 |---------|-------------|
 | `/login` | Log in to LanguageNut with your username/password |
-| `/logout` | Log out and clear stored credentials |
-| `/homework` | Show all assignments with progress |
-| `/do` | Interactive task selector — pick tasks to auto-complete |
-| `/quick-do` | Quick-complete by homework:index (e.g. `123:0`) with autocomplete |
-| `/settings` | Customize timing, accuracy, concurrency, and retry settings |
-| `/status` | Show bot stats (servers, latency, login status) |
-| `/tutorial` | Show this guide in Discord |
+| `/logout` | Remove stored credentials |
+| `/homework` | Show all assignments with progress bars |
+| `/do` | Interactive task selector — browse and pick tasks |
+| `/quick-do` | Quick-complete by homework:index (e.g. `123:0`) |
+| `/settings` | Customize timing, accuracy, concurrency, retries |
+| `/status` | Show bot stats and your login status |
+| `/leaderboard` | View class, school, or world rankings |
+| `/tutorial` | Show this guide |
 
 ### Admin Commands (owner only)
 
 | Command | Description |
 |---------|-------------|
-| `/sync` | Sync slash commands (after code changes) |
-| `/reload` | Reload a cog without restart |
-| `/clear` | Delete recent messages (1-100) |
-| `/logs` | Show last 20 log lines |
+| `/sync` | Refresh slash commands after code changes |
+| `/reload` | Reload bot module without restart |
+| `/logs` | View user usage, homework history, or bot logs |
 | `/update` | Git pull + auto-restart |
 | `/restart` | Restart the bot |
 | `/shutdown` | Stop the bot |
-| `/eval` | Execute Python code (for debugging) |
-| `/online` | @everyone announce bot online |
-| `/offline` | @everyone announce bot offline |
+| `/clear` | Delete recent messages (1-100) |
 
-## Per-Question Timing (Customizable)
+## Doing Homework
 
-Each vocabulary item in a task gets a **random completion time** in your chosen range.
+### With `/do` (recommended for first use)
 
-**Default:** `5–8 seconds per question`
+1. Run `/do` — an interactive menu shows your assignments
+2. Select a homework assignment from the dropdown
+3. Pick specific tasks (or \"Do ALL\")
+4. The bot processes them and reports results
 
-Example with 20 vocab items:
-- Each item: random 5–8s → average 6.5s
-- Total timestamp: ~130 seconds (cumulative sum + small jitter)
+### With `/quick-do` (for power users)
 
-### How to Configure
+Format: `homeworkId:taskIndex` (comma-separated for batch)
 
-Run `/settings` and use the buttons:
-- **Time Per-Q Min** — Set the minimum seconds per question (1–300s)
-- **Time Per-Q Max** — Set the maximum seconds per question (1–300s)
+**Examples:**
+- `/quick-do 123:0` — Complete task #0 in homework #123
+- `/quick-do 123:0,456:2,789:4` — Complete 3 tasks at once
 
-If Min > Max, the bot auto-swaps them.
+Autocomplete shows available tasks as you type.
 
-## Settings Panel
+## Customizing Settings
 
-`/settings` opens an interactive panel with these options:
+Run `/settings` to open the control panel:
 
-| Button | What it does |
-|--------|-------------|
-| Time Per-Q Min | Minimum seconds per question (1–300) |
-| Time Per-Q Max | Maximum seconds per question (1–300) |
-| Min Accuracy | Minimum accuracy % (0–100) |
-| Max Accuracy | Maximum accuracy % (0–100) |
-| Concurrency | Number of parallel tasks |
-| Retry Attempts | Max retries per failed task |
-| Stealth Toggle | On/off for accuracy/stealth features |
-| Auto Retry | On/off for automatic retry on failure |
-| Reset | Reset all settings to defaults |
+| Setting | What it does |
+|---------|-------------|
+| Time Per-Q (Min/Max) | How many seconds per vocabulary item (5-8s default) |
+| Accuracy (Min/Max) | What % of answers are marked correct |
+| Concurrency | How many tasks run in parallel (1-8) |
+| Retry Attempts | How many times to retry on failure |
+| Stealth Toggle | Enable/disable realistic behavior |
 
-Accuracy range works like timing: each task picks a random accuracy target within [Min%, Max%]. Only that percentage of vocabs are marked "correct" — mimicking human performance.
+Accuracy works like timing: each task picks a random accuracy within [Min%, Max%]. The remaining vocabs are marked \"wrong\" — mimicking real human performance.
 
-## /do vs /quick-do
+## Leaderboard Types
 
-**`/do`** — Interactive homework browser with dropdown selectors. Best for:
-- First-time use
-- Browsing available assignments
-- Selecting specific tasks visually
+| Command | What it shows |
+|---------|---------------|
+| `/leaderboard class` | Students in your class, ranked by score |
+| `/leaderboard school` | All students in your school |
+| `/leaderboard global` | Worldwide school competition rankings |
 
-**`/quick-do`** — Fast parameter-based completion using `hwId:idx` syntax. Best for:
-- Power users who know the homework IDs
-- Batching multiple tasks: `123:0,456:2,789:4`
-- Scripting / repeated runs
+## Tips
 
-Autocomplete shows available incomplete tasks as you type.
-
-## How Timing Works (Technical)
-
-1. `StealthManager.compute_timestamp(num_questions)` is called with the vocabulary count
-2. For each question, a random value in [min_sec, max_sec] is generated
-3. All values are summed
-4. A small jitter (`random.uniform(-0.5, 1.5)`) is added
-5. The total is converted to milliseconds and sent as `timeStamp`
-
-This creates a realistic cumulative completion time that varies per submission.
+- **Mobile users:** The bot works on mobile Discord. Select menus and buttons are fully compatible.
+- **First use:** `/login` then `/homework` then `/do` — three commands and you're set.
+- **Check progress:** Run `/homework` anytime to see updated progress bars.
+- **Concurrency:** Increase concurrency in `/settings` for faster batch processing (higher = more API load).
+- **Wait for results:** Heavy batches may take a few minutes. The bot posts results when done.
 
 ## Troubleshooting
 
-**"Application didn't respond"**
-All commands use `interaction.response.defer()` to get the 15-minute thinking window. If you still see this, the LanguageNut API might be timing out. Try reducing `concurrency` in `/settings`.
+**"Not logged in"** — Use `/login` with your LanguageNut credentials.
 
-**"Not logged in"**
-Use `/login` with your LanguageNut credentials (username/password from languagenut.com, not Discord).
+**"Homework not found"** — Run `/homework` first to refresh the cache, then `/do`.
 
-**Commands not appearing**
-Run `/sync` (owner only) to refresh the command list. Discord can take up to 1 hour for global commands, or instant for guild-scoped.
+**Commands not appearing** — An admin needs to run `/sync`.
 
-**Bot crashing on startup**
-Check `.env` exists with valid `DISCORD_TOKEN`. Check `GUILD_ID` is a valid Discord server ID (enable Developer Mode in Discord → right-click server → Copy ID).
+**Bot not responding** — Commands defer automatically for a 15-minute window. If you still get timeout, the LanguageNut API may be slow. Try reducing concurrency in `/settings`.
 
-**Autocomplete not working**
-Autocomplete uses a 30-second cache. If tasks have changed recently, wait 30s or open `/do` to force-refresh the cache.
-
-## File Structure
-
-```
-In_bot/
-├── main.py                 # Entry point
-├── config.py               # Settings & account storage
-├── requirements.txt        # Python dependencies
-├── tutorial.md             # This file
-├── run.bat                 # Windows launcher
-├── .env                    # Environment variables (token, keys)
-├── config.json             # Per-guild settings & accounts (auto-created)
-├── logs/bot.log            # Log file (auto-created)
-├── automation/
-│   ├── api_direct.py       # LanguageNut HTTP client
-│   ├── discover.py         # Homework discovery
-│   └── stealth.py          # Timing & accuracy engine
-├── commands/
-│   └── commands.py         # All slash commands
-└── utils/
-    ├── encryption.py       # Fernet credential encryption
-    ├── helper.py           # Utility functions
-    └── logger.py           # Logging setup
-```

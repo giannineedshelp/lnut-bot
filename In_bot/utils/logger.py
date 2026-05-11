@@ -147,3 +147,10 @@ def fetch_bot_logs(level: str = None, lines: int = 100):
 
     return all_lines[-lines:]
 
+
+def get_user_usage_count(user_id: int) -> int:
+    """Return total command count for this user."""
+    logs = fetch_user_logs(user_id)
+    return len(logs)
+
+

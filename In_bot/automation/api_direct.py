@@ -320,6 +320,19 @@ class LNApiClient:
         else:
             return await self._get_world_leaderboard()
 
+    async def get_class_leaderboard(self) -> dict:
+        return await self._get_class_leaderboard()
+
+    async def get_school_leaderboard(self) -> dict:
+        return await self._get_school_leaderboard()
+
+    async def get_world_leaderboard(self) -> dict:
+        return await self._get_world_leaderboard()
+
+    async def get_school_rankings(self) -> list[dict]:
+        data = await self._get_world_leaderboard()
+        return data.get('leaderboard', [])
+
     async def _get_school_leaderboard(self) -> dict:
         """School-wide leaderboard from highscoreController/studentsAllAccount."""
         data = await self.call_lnut(
