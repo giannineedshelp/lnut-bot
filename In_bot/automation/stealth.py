@@ -137,10 +137,6 @@ class StealthManager:
         jitter = random.uniform(-0.5, 1.5)
         return math.floor((total_s + jitter) * 1000)
 
-    def fake_time_display(self) -> str:
-        """Human-readable string for per-question range."""
-        return f"{self.min_seconds_per_question}–{self.max_seconds_per_question}s per question"
-
     def speed_display(self) -> str:
         """Human-readable per-question speed string."""
         return f"{self.min_seconds_per_question}–{self.max_seconds_per_question}s per question"
@@ -153,11 +149,6 @@ class StealthManager:
         base_delay = min(3.0, self.speed * 0.15)
         jitter     = random.uniform(-0.5, 1.5)
         return max(0.5, base_delay + jitter)
-
-    def human_typing_delay(self, char_count: int) -> float:
-        base  = random.uniform(0.3, 1.0)
-        extra = max(0, char_count - 50) * 0.002
-        return base + extra
 
     # ------------------------------------------------------------------
     # Accuracy

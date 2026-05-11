@@ -92,9 +92,11 @@ class LNApiClient:
         self,
         session: aiohttp.ClientSession,
         stealth_manager: Optional[Any] = None,
+        guild_id: int = 0,
     ):
         self.session = session
         self.stealth = stealth_manager
+        self.guild_id = guild_id
         self.token: str = ""
         self.account_uid: str = ""
         self.user_uid: str = ""
@@ -125,6 +127,9 @@ class LNApiClient:
                     new_tok = result.get("newToken")
                     if new_tok and new_tok != self.token:
                         self.token = new_tok
+                        if self.guild_id:
+                            import config
+                            config.update_token(self.guild_id, new_tok)
                     return result
                 except json.JSONDecodeError:
                     logger.error(
@@ -154,11 +159,43 @@ class LNApiClient:
             self.account_uid = data.get("accountUid", "")
             self.user_uid = data.get("uid", "")
             self.person_name = data.get("personName", "")
+            if self.guild_id:
+                import config
+                config.update_token(self.guild_id, token)
             logger.info("Login successful as %s (uid=%s, account=%s)",
                         self.person_name, self.user_uid, self.account_uid)
         else:
             logger.error(f"Login failed: {data}")
         return token
+
+    async def re_login(self) -> bool:
+        """Re-authenticate using stored credentials. Returns True on success."""
+        if not self.guild_id:
+            return False
+        import config
+        acct = config.get_account(self.guild_id)
+        if not acct:
+            return False
+        from utils.encryption import decrypt_value
+        try:
+            import importlib
+            main_mod = importlib.import_module("main")
+            bot = getattr(main_mod, "bot", None)
+        except Exception:
+            bot = None
+        fernet = getattr(bot, "fernet", None) if bot else None
+        enc_user = acct.get("username", "")
+        enc_pass = acct.get("password", "")
+        if not enc_user or not enc_pass:
+            return False
+        if fernet:
+            username = decrypt_value(fernet, enc_user)
+            password = decrypt_value(fernet, enc_pass)
+        else:
+            username = enc_user
+            password = enc_pass
+        tok = await self.login(username, password)
+        return tok is not None
 
     # ----- Task-data fetchers (match JS params exactly) -----
 

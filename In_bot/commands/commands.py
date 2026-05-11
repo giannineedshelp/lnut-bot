@@ -185,13 +185,14 @@ class SettingsView(ui.View):
         )
 
 # Per-Question Timing
-        avg_s = (s["min_seconds_per_question"] + s["max_seconds_per_question"]) / 2.0
+        from automation.stealth import StealthManager
+        display = StealthManager(
+            min_seconds_per_question=s["min_seconds_per_question"],
+            max_seconds_per_question=s["max_seconds_per_question"],
+        ).speed_display()
         embed.add_field(
             name="Time Per Question",
-            value=(
-                f"`{s['min_seconds_per_question']}s` -- `{s['max_seconds_per_question']}s`"
-                f"*avg {avg_s}s/q  (range)*"
-            ),
+            value=f"{display}",
             inline=True,
         )
         embed.add_field(name="​", value="​", inline=True)
@@ -752,6 +753,15 @@ async def _execute_jobs(
 
                     if result.get("error"):
                         body = result.get("body", str(result))
+                        # Auto-re-login if token expired (401/403) on first attempt
+                        if result.get("status") in (401, 403) and attempt == 1:
+                            logger.warning("Token expired, attempting re-login...")
+                            try:
+                                re_ok = await client.re_login()
+                                if re_ok:
+                                    continue
+                            except Exception:
+                                logger.exception("Re-login failed")
                         ls = config.get_guild_settings(guild_id)
                         retries = ls["retry_attempts"] if ls["auto_retry"] else 0
                         if attempt <= retries:
@@ -770,7 +780,17 @@ async def _execute_jobs(
                         continue
                     return hw_name, task_name, False, str(e)[:120]
 
-    results = await asyncio.gather(*(run_one(hw, t) for hw, t in jobs))
+    # Stagger task starts with realistic human delays between them
+    async def _staggered_start(hw: dict, t_obj: dict, delay: float) -> tuple[str, str, bool, str]:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        return await run_one(hw, t_obj)
+
+    tasks = []
+    for i, (hw, t) in enumerate(jobs):
+        d = client.stealth.delay_between_tasks() if i > 0 else 0
+        tasks.append(_staggered_start(hw, t, d))
+    results = await asyncio.gather(*tasks)
     ok  = [r for r in results if r[2]]
     bad = [r for r in results if not r[2]]
 
@@ -881,7 +901,7 @@ class BotCommands(commands.Cog):
             min_seconds_per_question    = settings["min_seconds_per_question"],
             max_seconds_per_question    = settings["max_seconds_per_question"],
         )
-        client = LNApiClient(self.bot.aiohttp_session, stealth)
+        client = LNApiClient(self.bot.aiohttp_session, stealth, guild_id=guild_id)
         fernet = self.bot.fernet
 
         enc_user = account.get("username", "")
