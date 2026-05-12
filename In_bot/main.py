@@ -93,7 +93,6 @@ print("TOKEN LOADED:", bool(TOKEN))
 # LOCAL IMPORTS
 # =========================
 from utils.logger import setup_logging, log_user_command
-from utils.encryption import get_fernet
 
 logger = setup_logging()
 
@@ -128,7 +127,6 @@ class LanguageNutBot(commands.Bot):
         )
 
         self.aiohttp_session: Optional[ClientSession] = None
-        self.fernet = get_fernet()
 
     async def setup_hook(self):
         connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)

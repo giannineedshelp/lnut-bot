@@ -29,7 +29,6 @@ import config
 from automation.api_direct import LNApiClient
 from automation.discover import HomeworkDiscoverer
 from automation.stealth import StealthManager, seconds_to_human
-from utils.encryption import decrypt_value, encrypt_value
 from utils.helper import _pct, _is_done
 from utils.logger import log_user_command, log_homework_action, fetch_user_logs, fetch_homework_logs, fetch_bot_logs, get_user_usage_count
 
@@ -902,12 +901,10 @@ class BotCommands(commands.Cog):
             max_seconds_per_question    = settings["max_seconds_per_question"],
         )
         client = LNApiClient(self.bot.aiohttp_session, stealth, guild_id=guild_id)
-        fernet = self.bot.fernet
-
         enc_user = account.get("username", "")
         enc_pass = account.get("password", "")
-        username = decrypt_value(fernet, enc_user) if enc_user else ""
-        password = decrypt_value(fernet, enc_pass) if enc_pass else ""
+        username = enc_user if enc_user else ""
+        password = enc_pass if enc_pass else ""
 
         async with self._get_lock(guild_id):
             token = account.get("token", "")
@@ -1027,11 +1024,10 @@ class BotCommands(commands.Cog):
         if not token:
             await interaction.followup.send("❌ Login failed. Check your username and password.", ephemeral=True)
             return
-        fernet = self.bot.fernet
         config.set_account(
             interaction.guild_id,
-            encrypt_value(fernet, username),
-            encrypt_value(fernet, password),
+            username,
+            password,
             token,
         )
         self._hw_cache.pop(interaction.guild_id, None)

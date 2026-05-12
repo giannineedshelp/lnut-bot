@@ -124,6 +124,44 @@ def get_all_accounts() -> dict:
     return config.get("accounts", {})
 
 
+
+
+# ==========================================================
+# ADMIN ACCOUNTS (teacher/management)
+# ==========================================================
+def get_admin_account(guild_id: int) -> dict | None:
+    """Get stored admin account for a guild, or None."""
+    cfg = load_config()
+    return cfg.get("admin_accounts", {}).get(str(guild_id))
+
+
+def set_admin_account(guild_id: int, username: str, password: str, token: str = "") -> dict:
+    """Set admin account credentials for a guild."""
+    cfg = load_config()
+    cfg.setdefault("admin_accounts", {})[str(guild_id)] = {
+        "username": username,
+        "password": password,
+        "token": token,
+    }
+    save_config(cfg)
+    return cfg["admin_accounts"][str(guild_id)]
+
+
+def remove_admin_account(guild_id: int) -> bool:
+    """Remove stored admin account for a guild. Returns True if existed."""
+    cfg = load_config()
+    if str(guild_id) in cfg.get("admin_accounts", {}):
+        del cfg["admin_accounts"][str(guild_id)]
+        save_config(cfg)
+        return True
+    return False
+
+
+def get_all_admin_accounts() -> dict:
+    """Get all stored admin accounts."""
+    cfg = load_config()
+    return cfg.get("admin_accounts", {})
+
 # ==========================================================
 # GUILD SETTINGS
 # ==========================================================

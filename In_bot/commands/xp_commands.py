@@ -22,7 +22,6 @@ from discord.ext import commands
 import config
 from automation.api_direct import LNApiClient
 from automation.stealth import StealthManager, seconds_to_human
-from utils.encryption import decrypt_value, encrypt_value
 from utils.helper import _is_done
 from utils.logger import log_homework_action, log_user_command
 
@@ -213,4 +212,41 @@ class XpCommands(commands.Cog):
     async def _get_api_client(self, guild_id: int) -> Optional[LNApiClient]:
         """Get the LN API client for a guild, or None."""
         account = config.get_account(guild_id)
-       
+        if not account:
+            return None
+        settings = config.get_guild_settings(guild_id)
+        stealth = StealthManager(
+            speed=settings["speed"],
+            min_accuracy=settings["min_accuracy"],
+            max_accuracy=settings["max_accuracy"],
+            min_seconds_per_question=settings["min_seconds_per_question"],
+            max_seconds_per_question=settings["max_seconds_per_question"],
+        )
+        client = LNApiClient(self.bot.aiohttp_session, stealth, guild_id=guild_id)
+        enc_user = account.get("username", "")
+        enc_pass = account.get("password", "")
+        username = enc_user if enc_user else ""
+        password = enc_pass if enc_pass else ""
+        token = account.get("token", "")
+        if token:
+            client.token = token
+            try:
+                test = await client.call_lnut("assignmentController/getViewableAll", {"token": token})
+                if not test.get("error"):
+                    return client
+            except Exception:
+                logger.exception("Token validation failed")
+        if not username or not password:
+            logger.warning("No stored credentials for guild %s", guild_id)
+            return None
+        logger.info("Re-logging in for guild %s", guild_id)
+        new_token = await client.login(username, password)
+        if new_token:
+            config.update_token(guild_id, new_token)
+            self._hw_cache.pop(guild_id, None)
+            return client
+        return None
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(XpCommands(bot))

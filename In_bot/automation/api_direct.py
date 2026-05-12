@@ -176,24 +176,12 @@ class LNApiClient:
         acct = config.get_account(self.guild_id)
         if not acct:
             return False
-        from utils.encryption import decrypt_value
-        try:
-            import importlib
-            main_mod = importlib.import_module("main")
-            bot = getattr(main_mod, "bot", None)
-        except Exception:
-            bot = None
-        fernet = getattr(bot, "fernet", None) if bot else None
         enc_user = acct.get("username", "")
         enc_pass = acct.get("password", "")
         if not enc_user or not enc_pass:
             return False
-        if fernet:
-            username = decrypt_value(fernet, enc_user)
-            password = decrypt_value(fernet, enc_pass)
-        else:
-            username = enc_user
-            password = enc_pass
+        username = enc_user
+        password = enc_pass
         tok = await self.login(username, password)
         return tok is not None
 

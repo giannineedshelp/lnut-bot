@@ -203,3 +203,22 @@ class StealthManager:
             f"{self.max_seconds_per_question}s "
             f"accuracy={self.min_accuracy}%–{self.max_accuracy}%>"
         )
+
+def seconds_to_human(seconds: float) -> str:
+    """Convert a duration in seconds to a human-readable string like '2h 30m 15s'."""
+    if seconds is None or seconds < 0:
+        return "0s"
+    total = int(seconds)
+    days, remainder = divmod(total, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
