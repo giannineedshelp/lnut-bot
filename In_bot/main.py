@@ -159,7 +159,7 @@ class LanguageNutBot(commands.Bot):
         logger.info("Setup complete")
 
     async def _load_cogs(self):
-        cogs: list[str] = ["commands.commands", "commands.xp_commands"]
+        cogs: list[str] = ["commands.commands", "commands.xp_commands", "commands.admin_commands"]
 
         for cog in cogs:
             try:
@@ -236,5 +236,4 @@ class LanguageNutBot(commands.Bot):
                 f"Executed in guild {interaction.guild_id}",
             )
         except Exception as e:
-            logger.warning(f"Failed command logging: {e}")
-
+            logger.war

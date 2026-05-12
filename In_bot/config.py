@@ -153,3 +153,44 @@ def reset_guild_settings(guild_id: int) -> None:
         del config["guild_settings"][str(guild_id)]
         save_config(config)
 
+
+
+# ==========================================================
+# ADMIN ACCOUNTS (teacher/admin credentials for ban/unban)
+# ==========================================================
+def get_admin_account(guild_id: int) -> dict | None:
+    """Get admin account config for a guild, or None."""
+    config = load_config()
+    return config.get("admin_accounts", {}).get(str(guild_id))
+
+
+def set_admin_account(guild_id: int, username: str, password: str, token: str = "") -> dict:
+    """Set admin account credentials for a guild (encrypted)."""
+    config = load_config()
+    config.setdefault("admin_accounts", {})[str(guild_id)] = {
+        "username": username,
+        "password": password,
+        "token": token,
+    }
+    save_config(config)
+    return config["admin_accounts"][str(guild_id)]
+
+
+def update_admin_token(guild_id: int, token: str) -> None:
+    """Update only the token for an existing admin account."""
+    config = load_config()
+    acct = config.get("admin_accounts", {}).get(str(guild_id))
+    if acct:
+        acct["token"] = token
+        save_config(config)
+
+
+def remove_admin_account(guild_id: int) -> bool:
+    """Remove admin account for a guild. Returns True if existed."""
+    config = load_config()
+    if str(guild_id) in config.get("admin_accounts", {}):
+        del config["admin_accounts"][str(guild_id)]
+        save_config(config)
+        return True
+    return False
+

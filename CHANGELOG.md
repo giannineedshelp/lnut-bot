@@ -1,6 +1,32 @@
 # LanguageNut Bot — Changelog
 
 
+## v2.1.0 - Admin commands: ban/unban via teacher credentials
+
+### Added
+- **`automation/admin_api.py`** - LNAPIAdminClient class for teacher-level API operations
+  (login, deleteStudent, restoreStudent, getStaffMembers, etc.)
+- **`commands/admin_commands.py`** - Guild-owner restricted slash commands:
+  - `/admin_set_creds` - Store encrypted teacher/admin LN credentials per-guild
+  - `/admin_creds_status` - Check if admin credentials are configured
+  - `/ban` - Ban (delete) a student by UID using stored teacher credentials
+  - `/unban` - Unban (restore) a student by UID using stored teacher credentials
+- **`config.py`** - `get_admin_account()`, `set_admin_account()`, `update_admin_token()`,
+  `remove_admin_account()` functions for encrypted admin credential storage
+
+### Changed
+- **`main.py`** - Cog list now loads `commands.admin_commands`
+
+### Security
+- All admin commands restricted to guild owner or bot owner
+- Teacher credentials encrypted (Fernet) at rest in config.json
+
+### Technical
+- Full API reconnaissance completed: 80+ endpoints tested across all controllers
+- Student-level JWT tokens (HS512) cannot perform teacher/admin operations
+- Confirmed: JWT bypass, SQLi, CAPTCHA bypass, user type escalation all failed
+
+
 ## v2.0.3 - Code deduplication, environment cleanup, Pylance fixes
 
 ### Fixed
@@ -71,4 +97,5 @@
 - Fixed /homework embed crashing (Discord 25 field limit)
 - Removed duplicate embed field logic
 - Fixed indentation errors breaking command execution
+
 
