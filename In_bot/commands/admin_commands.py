@@ -17,7 +17,7 @@ from discord import Interaction, app_commands
 from discord.ext import commands
 
 import config
-from automation.admin_api import LNAdminClient
+from automation.admin_api import LNAPIAdminClient
 from utils.logger import log_user_command
 
 logger = logging.getLogger("lnut_bot.admin_commands")
@@ -53,7 +53,7 @@ class AdminCommands(commands.Cog):
             username = stored.get("username", "")
             password = stored.get("password", "")
             if username and password:
-                client = LNAdminClient()
+                client = LNAPIAdminClient()
                 token = await client.login(username, password)
                 if token:
                     self._admin_clients[guild_id] = client
@@ -77,7 +77,7 @@ class AdminCommands(commands.Cog):
         if not gid:
             await interaction.followup.send("Guild only command.", ephemeral=True)
             return
-        client = LNAdminClient()
+        client = LNAPIAdminClient()
         token = await client.login(username, password)
         if not token:
             await interaction.followup.send("Login failed. Check the username and password.", ephemeral=True)
@@ -129,7 +129,7 @@ class AdminCommands(commands.Cog):
         if interaction.user.id != OWNER_ID:
             return await interaction.followup.send("\U0001f6ab Owner only.", ephemeral=True)
 
-        client = LNAdminClient()
+        client = LNAPIAdminClient()
         token = await client.login(username, password)
         if token:
             gid = interaction.guild_id or 0
