@@ -9,7 +9,6 @@ import logging
 import random
 import time
 from typing import Optional, Dict, Any, List, Tuple
-from datetime import datetime, timezone
 from urllib.parse import urljoin
 
 logger = logging.getLogger("lnut_bot.api_direct")
@@ -29,27 +28,12 @@ API_BASE = "https://api.languagenut.com"
 LIVE_BASE = "https://live.languagenut.com"
 
 # Realistic browser headers
-CHROME_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-GB,en;q=0.9,de;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Connection": "keep-alive",
-    "Cache-Control": "max-age=0",
-}
-
 API_HEADERS = {
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-GB,en;q=0.9,de;q=0.8",
+    "Accept-Language": "en-GB,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
+    "Origin": "https://www.languagenut.com",
+    "Referer": "https://www.languagenut.com/",
     "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
@@ -57,9 +41,6 @@ API_HEADERS = {
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Site": "same-site",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Content-Type": "application/json",
-    "Origin": "https://www.languagenut.com",
-    "Referer": "https://www.languagenut.com/",
 }
 
 USER_AGENTS = [
@@ -78,13 +59,15 @@ class LanguagenutClient:
     with realistic browser-like behavior.
     """
 
-    def __init__(self):
+    def __init__(self, stealth=None, guild_id: int = 0):
         self.session = self._create_session()
         self.token: Optional[str] = None
         self.refresh_token: Optional[str] = None
         self.token_expiry: Optional[float] = None
         self.username: Optional[str] = None
         self.last_request_time: float = 0
+        self.stealth = stealth
+        self.guild_id = guild_id
 
     def _create_session(self):
         """Create an HTTP session with browser-like configuration."""
@@ -144,7 +127,6 @@ class LanguagenutClient:
         if resp.status_code == 200 and data.get("token"):
             self.token = data["token"]
             self.refresh_token = data.get("refreshToken")
-            # Set auth header for subsequent requests
             self.session.headers["Authorization"] = f"Bearer {self.token}"
             logger.info(f"Successfully logged in as {username}")
             return True, None
@@ -171,7 +153,119 @@ class LanguagenutClient:
         return False
 
     # ------------------------------------------------------------------
-    # API Methods
+    # API Methods (sync — used by commands.py/discover.py)
+    # ------------------------------------------------------------------
+
+    def call_lnut(self, endpoint: str, params: dict = None) -> dict:
+        """
+        Generic API call to LanguageNut.
+
+        endpoint: e.g. "assignmentController/getViewableAll"
+        params: dict of query/post parameters, must include "token" if needed
+        """
+        if params is None:
+            params = {}
+
+        url = urljoin(API_BASE, f"/{endpoint}")
+        self._throttle()
+
+        token = params.pop("token", self.token)
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        try:
+            resp = self.session.post(url, json=params, headers=headers, timeout=30)
+            data = resp.json()
+            if resp.status_code == 200:
+                return data
+            else:
+                return {"error": True, "status": resp.status_code, "body": data}
+        except Exception as e:
+            return {"error": True, "body": str(e)}
+
+    def fetch_task_data(self, task: dict, game_link: str = "", to_lang: str = "") -> Optional[list]:
+        """
+        Fetch vocab data for a task.
+
+        Returns list of vocab items or None on failure.
+        """
+        task_type = self._resolve_task_type(task)
+        uid = task.get("gameUid", "") or task.get("uid", "")
+
+        common_params = {
+            "token": self.token,
+        }
+
+        if task_type == "sentence":
+            common_params["sentenceCatalogUid"] = uid
+            endpoint = "sentenceCatalogController/getSentence"
+        elif task_type == "verb":
+            common_params["verbUid"] = uid
+            endpoint = "verbController/getVerb"
+        elif task_type == "phonic":
+            common_params["phonicCatalogUid"] = uid
+            endpoint = "phonicCatalogController/getPhonic"
+        elif task_type == "exam":
+            common_params["examUid"] = uid
+            endpoint = "examController/getExam"
+        else:
+            # Default: vocab task
+            common_params["gameUid"] = uid
+            common_params["toLanguage"] = to_lang or "en"
+            endpoint = "gameDataController/getGameVocab"
+
+        data = self.call_lnut(endpoint, common_params)
+        if data.get("error"):
+            logger.warning(f"fetch_task_data failed for {uid}: {data.get('body', '')[:100]}")
+            return None
+
+        # Extract vocab list from response
+        vocabs = data.get("vocabs", data.get("sentences", data.get("items", [])))
+        if not vocabs:
+            vocabs = [data] if isinstance(data, dict) and data.get("uid") else []
+        return vocabs if vocabs else None
+
+    def submit_score(self, task_data: dict) -> dict:
+        """
+        Submit a completed task score.
+
+        task_data should be the full submission payload.
+        Returns the API response dict.
+        """
+        url = urljoin(API_BASE, "/tasks/submit")
+        self._throttle()
+        try:
+            resp = self.session.post(
+                url, json=task_data,
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=30
+            )
+            data = resp.json()
+            if resp.status_code == 200:
+                return data
+            else:
+                return {"error": True, "status": resp.status_code, "body": data}
+        except Exception as e:
+            return {"error": True, "body": str(e)}
+
+    # ------------------------------------------------------------------
+    # Legacy sync submit (used by commands.py)
+    # ------------------------------------------------------------------
+
+    def submit_score_legacy(self, token: str, task: dict) -> dict:
+        """Legacy submit wrapper (used by old dashboard commands)."""
+        payload = {
+            "token": token,
+            "taskUid": task.get("gameUid", ""),
+            "gameLink": task.get("gameLink", ""),
+            "percentage": 100,
+            "timeSpent": random.randint(30000, 120000),
+        }
+        return self.call_lnut("assignmentController/submitTask", payload)
+
+    # ------------------------------------------------------------------
+    # Assignment Methods
     # ------------------------------------------------------------------
 
     def get_assignments(self) -> Tuple[bool, Any]:
@@ -195,28 +289,14 @@ class LanguagenutClient:
             return False, str(e)
 
     def submit_task(self, task_data: dict) -> Tuple[bool, Any]:
-        """
-        Submit a completed task.
-
-        task_data should contain the full task submission payload
-        including timing and accuracy data.
-        """
-        url = urljoin(API_BASE, "/tasks/submit")
-        self._throttle()
-        try:
-            resp = self.session.post(url, json=task_data, timeout=30)
-            data = resp.json()
-            if resp.status_code == 200:
-                return True, data
-            elif resp.status_code == 403 and "ACCOUNT_BLOCKED" in str(data):
-                return False, "ACCOUNT_BLOCKED"
-            else:
-                return False, data.get("message", str(data)[:200])
-        except Exception as e:
-            return False, str(e)
+        """Submit a completed task (returns tuple for backward compat)."""
+        result = self.submit_score(task_data)
+        if result.get("error"):
+            return False, result.get("body", "Unknown error")
+        return True, result
 
     def get_leaderboard(self) -> Tuple[bool, Any]:
-        """Fetch leaderboard data for endpoint diversity."""
+        """Fetch leaderboard data."""
         url = urljoin(API_BASE, "/leaderboard")
         self._throttle()
         try:
@@ -226,7 +306,7 @@ class LanguagenutClient:
             return False, str(e)
 
     def get_profile(self) -> Tuple[bool, Any]:
-        """Fetch user profile for endpoint diversity."""
+        """Fetch user profile."""
         url = urljoin(API_BASE, "/auth/me")
         self._throttle()
         try:
@@ -234,6 +314,25 @@ class LanguagenutClient:
             return resp.status_code == 200, resp.json()
         except Exception as e:
             return False, str(e)
+
+    # ------------------------------------------------------------------
+    # Task Type Resolution
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_task_type(task: dict) -> str:
+        """Determine task type from gameLink."""
+        game_link = task.get("gameLink", "")
+        patterns = {
+            "sentence": "sentenceCatalog",
+            "verb": "verbUid",
+            "phonic": "phonicCatalogUid",
+            "exam": "examUid",
+        }
+        for task_type, pattern in patterns.items():
+            if pattern in game_link:
+                return task_type
+        return "vocabs"
 
     # ------------------------------------------------------------------
     # Session Management
@@ -249,3 +348,9 @@ class LanguagenutClient:
         self.token = None
         self.refresh_token = None
         self.username = None
+
+
+# ======================================================================
+# ALIAS for backward compatibility with files importing LNApiClient
+# ======================================================================
+LNApiClient = LanguagenutClient

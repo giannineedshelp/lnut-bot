@@ -42,196 +42,228 @@ ACCURACY_RANGES = {
 
 # Hour multipliers: how fast/slow a human works at different times of day
 # Based on typical student circadian rhythms
-TIME_OF_DAY_PROFILES = {
-    # 0-5:深夜 - very slow, sleepy
-    # 6-8:早晨 - waking up, slow start
-    # 9-12:上午 - alert, school hours
-    # 13-15:下午 - post-lunch dip
-    # 16-18:傍晚 - afternoon energy
-    # 19-21:晚上 - evening homework time
-    # 22-23:深夜 - winding down
-}
-
-# Pre-computed hour multipliers (24 entries, index = hour)
 HOUR_MULTIPLIERS = [
-    2.8,  # 00:00 - deep night, very slow
-    3.0,  # 01:00
-    3.2,  # 02:00 - peak slowness
-    3.0,  # 03:00
-    2.5,  # 04:00
-    2.0,  # 05:00
-    1.5,  # 06:00 - waking up
-    1.2,  # 07:00 - morning routine
-    1.0,  # 08:00 - school starting
-    0.9,  # 09:00 - alert
-    0.8,  # 10:00 - peak efficiency
+    2.8,  # 00:00 - deep sleep / very slow
+    2.6,  # 01:00
+    2.5,  # 02:00
+    2.5,  # 03:00
+    2.6,  # 04:00
+    2.4,  # 05:00
+    1.8,  # 06:00 - waking up
+    1.4,  # 07:00 - slow start
+    1.1,  # 08:00 - waking up properly
+    0.9,  # 09:00 - alert, school hours
+    0.8,  # 10:00 - peak morning
     0.8,  # 11:00
-    0.9,  # 12:00 - lunch approaching
+    0.9,  # 12:00 - lunch
     1.1,  # 13:00 - post-lunch dip
-    1.2,  # 14:00 - sleepy afternoon
-    1.0,  # 15:00 - recovering
-    0.9,  # 16:00 - afternoon energy
-    0.8,  # 17:00 - good focus
-    0.8,  # 18:00 - evening
-    0.9,  # 19:00 - homework time
-    1.0,  # 20:00
-    1.2,  # 21:00 - winding down
-    1.5,  # 22:00 - getting tired
-    2.0,  # 23:00 - night
+    1.2,  # 14:00
+    1.0,  # 15:00 - afternoon energy
+    0.9,  # 16:00
+    0.8,  # 17:00 - late afternoon
+    0.7,  # 18:00 - homework time (fastest)
+    0.7,  # 19:00
+    0.8,  # 20:00
+    1.0,  # 21:00 - winding down
+    1.5,  # 22:00
+    2.2,  # 23:00
 ]
 
-WEEKEND_MULTIPLIER = 1.4  # Humans work slower on weekends
+# Weekend modifier: slightly slower on weekends
+WEEKEND_MULTIPLIER = 1.15
 
-BURST_PATTERNS = [
-    # (tasks_in_burst, break_min, break_max)
-    (3,  30,  90),    # Small burst
-    (5,  60,  180),   # Medium burst
-    (8,  120, 300),   # Large burst
-    (12, 180, 480),   # Study session
-    (4,  45,  120),   # Common pattern
-    (6,  90,  240),   # Typical homework
-]
-
-# Common "wrong answers" that look realistic (real vocab items a student might confuse)
-# These are filled dynamically from actual vocab data when available
-COMMON_CONFUSIONS = {}  # correct_word -> [wrong_word1, wrong_word2, ...]
+# ---------------------------------------------------------------------------
+# Session Memory
+# ---------------------------------------------------------------------------
 
 
 class SessionMemory:
-    """Persistent per-account session memory to prevent repeat patterns."""
+    """Persistent session memory to avoid repeating identical patterns."""
 
     def __init__(self):
-        self.data: Dict[str, dict] = {}
-        self._load()
+        self._data = self._load()
 
-    def _load(self):
+    def _load(self) -> dict:
         if SESSION_MEMORY_FILE.exists():
             try:
-                self.data = json.loads(SESSION_MEMORY_FILE.read_text())
+                with open(SESSION_MEMORY_FILE, "r") as f:
+                    return json.load(f)
             except (json.JSONDecodeError, OSError):
-                self.data = {}
-        logger.debug(f"Loaded session memory for {len(self.data)} accounts")
+                return {}
+        return {}
 
     def _save(self):
         SESSION_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SESSION_MEMORY_FILE.write_text(json.dumps(self.data, indent=2))
+        with open(SESSION_MEMORY_FILE, "w") as f:
+            json.dump(self._data, f, indent=2)
 
     def get_profile(self, username: str) -> dict:
-        """Get or create a timing profile for an account."""
-        if username not in self.data:
-            # Generate a unique timing fingerprint for this account
-            seed = hash(username + "lnut_stealth_v3") & 0xFFFFFFFF
-            rng = random.Random(seed)
-            self.data[username] = {
-                "timing_baseline": round(rng.uniform(6.0, 12.0), 2),
-                "accuracy_tendency": round(rng.uniform(84, 94)),
-                "burst_preference": rng.randint(0, len(BURST_PATTERNS) - 1),
-                "session_count": 0,
-                "last_session_date": None,
-                "total_tasks_completed": 0,
-                "tod_offset": round(rng.uniform(-0.3, 0.3), 2),  # Personal TOD variation
-                "fatigue_rate": round(rng.uniform(0.02, 0.08), 3),
-                "recovery_rate": round(rng.uniform(0.01, 0.04), 3),
-                "avg_cv": None,
-                "cv_history": [],
-            }
-            self._save()
-            logger.info(f"Created new timing profile for {username}")
-        return self.data[username]
+        """Get session history for a user."""
+        return self._data.get(username, {})
 
     def update_profile(self, username: str, metrics: dict):
-        """Update profile with observed metrics after a session."""
-        if username in self.data:
-            prof = self.data[username]
-            prof["session_count"] += 1
-            prof["last_session_date"] = datetime.now(timezone.utc).isoformat()
-            prof["total_tasks_completed"] += metrics.get("tasks_completed", 0)
-            if "cv" in metrics and metrics["cv"] is not None:
-                prof["cv_history"].append(round(metrics["cv"], 4))
-                # Keep last 20 CV values
-                prof["cv_history"] = prof["cv_history"][-20:]
-                if prof["cv_history"]:
-                    prof["avg_cv"] = round(sum(prof["cv_history"]) / len(prof["cv_history"]), 4)
-            self._save()
+        """Update session memory with new metrics."""
+        profile = self._data.setdefault(username, {})
+        sessions = profile.setdefault("sessions", [])
+        sessions.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tasks_completed": metrics.get("tasks_completed", 0),
+            "cv": metrics.get("cv"),
+            "accuracy": metrics.get("accuracy"),
+            "fatigue": metrics.get("fatigue"),
+        })
+        # Keep only last 10 sessions
+        if len(sessions) > 10:
+            profile["sessions"] = sessions[-10:]
+        self._save()
 
 
 session_memory = SessionMemory()
 
 
-class StealthEngine:
-    """
-    Advanced behavioral mimicry engine for evading heuristic anti-cheat.
+# ---------------------------------------------------------------------------
+# StealthManager
+# ---------------------------------------------------------------------------
 
-    Generates human-like timing, accuracy, and interaction patterns
-    with proper Coefficient of Variation (>0.3) across all metrics.
+
+class StealthManager:
+    """
+    Manages all stealth/heuristic-evasion parameters for a farming session.
+
+    Each instance is tied to a specific user/guild and produces consistent
+    but varying timing and accuracy profiles across sessions.
     """
 
-    def __init__(self, username: str, guild_id: int = 0):
-        self.username = username
-        self.guild_id = guild_id
-        self.profile = session_memory.get_profile(username)
+    def __init__(
+        self,
+        speed: float = 10.0,
+        min_accuracy: int = 85,
+        max_accuracy: int = 92,
+        min_seconds_per_question: float = 5.0,
+        max_seconds_per_question: float = 8.0,
+        user_id: Optional[int] = None,
+        guild_id: Optional[int] = None,
+    ):
+        self.user_id = user_id or 0
+        self.guild_id = guild_id or 0
+
+        # Timing profile
+        self.min_seconds_per_question = min_seconds_per_question
+        self.max_seconds_per_question = max_seconds_per_question
+        self.speed = speed
+
+        # Accuracy range
+        self.min_accuracy = min_accuracy
+        self.max_accuracy = max_accuracy
+
+        # --- Fields referenced by methods, now explicitly initialized ---
+        # Timing
+        self.timing_baseline: float = random.uniform(
+            self.min_seconds_per_question, self.max_seconds_per_question
+        )
+        # Accuracy tendency (midpoint of range)
+        self.accuracy_tendency: int = (self.min_accuracy + self.max_accuracy) // 2
 
         # Session state
-        self.session_start = time.time()
-        self.tasks_this_session = 0
-        self.last_task_time = 0
-        self.burst_tasks_remaining = 0
-        self.burst_end_time = 0
-        self.in_break = False
-        self.warming_up = True
-        self.warmup_duration = random.randint(8, 20)  # tasks before full speed
-        self.current_tod_offset = self.profile["tod_offset"]
-        self.fatigue_level = 0.0  # 0.0 to 1.0
+        self.tasks_this_session: int = 0
+        self.fatigue_level: float = 0.0
+        self.warming_up: bool = True
+        self.warmup_duration: int = random.randint(3, 8)
 
-        # Select a burst pattern for this session
+        # Burst-pause state
+        self.burst_tasks_remaining: int = 1
+        self.break_min: int = 30
+        self.break_max: int = 120
+
+        # Profile dict (used by various methods)
+        self.profile: dict = {
+            "timing_baseline": self.timing_baseline,
+            "accuracy_tendency": self.accuracy_tendency,
+            "fatigue_rate": 0.03,
+            "speed": speed,
+        }
+
+        # Session memory
+        self.username: str = f"user_{self.user_id}"
+
+        # Initialize burst pattern
         self._select_burst_pattern()
 
-        logger.info(
-            f"StealthEngine initialized for {username} | "
-            f"baseline={self.profile['timing_baseline']}s | "
-            f"accuracy_tendency={self.profile['accuracy_tendency']}%"
+        logger.debug(
+            f"StealthManager initialized: baseline={self.timing_baseline:.1f}s, "
+            f"accuracy={self.accuracy_tendency}%, warmup={self.warmup_duration}"
         )
 
-    def _select_burst_pattern(self):
-        """Pick a burst pattern, with influence from profile preference."""
-        pref = self.profile["burst_preference"]
-        # Add some randomness around the preference
-        idx = max(0, min(len(BURST_PATTERNS) - 1,
-                         pref + random.randint(-1, 1)))
-        self.burst_size, self.break_min, self.break_max = BURST_PATTERNS[idx]
-        self.burst_tasks_remaining = self.burst_size
+    # ------------------------------------------------------------------
+    # Profile / Settings
+    # ------------------------------------------------------------------
+
+    def sync_settings(self, guild_id: Optional[int] = None):
+        """Sync settings from config for a specific guild."""
+        import config as cfg
+        gid = guild_id or self.guild_id
+        settings = cfg.get_guild_settings(gid)
+        self.min_seconds_per_question = settings.get("min_seconds_per_question", 5.0)
+        self.max_seconds_per_question = settings.get("max_seconds_per_question", 8.0)
+        self.min_accuracy = settings.get("min_accuracy", 85)
+        self.max_accuracy = settings.get("max_accuracy", 92)
+        self.speed = settings.get("speed", 10.0)
+        self.timing_baseline = random.uniform(
+            self.min_seconds_per_question, self.max_seconds_per_question
+        )
+        self.accuracy_tendency = (self.min_accuracy + self.max_accuracy) // 2
+        self.profile["timing_baseline"] = self.timing_baseline
+        self.profile["accuracy_tendency"] = self.accuracy_tendency
+        self.profile["speed"] = self.speed
+        logger.debug(f"Settings synced for guild {gid}")
 
     # ------------------------------------------------------------------
-    # Timing Methods
+    # Time-of-Day
     # ------------------------------------------------------------------
 
     def get_time_of_day_multiplier(self) -> float:
-        """Return multiplier based on current hour. Higher = slower."""
+        """Get multiplier based on current hour (slower at night)."""
         now = datetime.now(timezone.utc)
         hour = now.hour
-        base = HOUR_MULTIPLIERS[hour]
+        mult = HOUR_MULTIPLIERS[hour] if 0 <= hour < 24 else 1.0
 
-        # Weekend slowdown
-        if now.weekday() >= 5:  # Saturday or Sunday
-            base *= WEEKEND_MULTIPLIER
+        # Weekend modifier
+        if now.weekday() >= 5:  # Saturday=5, Sunday=6
+            mult *= WEEKEND_MULTIPLIER
 
-        # Add personal offset
-        base += self.current_tod_offset
+        # Add randomness (±10%)
+        mult *= random.uniform(0.9, 1.1)
 
-        return max(0.5, min(5.0, base))
+        return round(mult, 3)
+
+    # ------------------------------------------------------------------
+    # Burst-Pause
+    # ------------------------------------------------------------------
+
+    def _select_burst_pattern(self):
+        """Select a new burst pattern (cluster size and break duration)."""
+        # Burst: 3-12 tasks before a break
+        self.burst_tasks_remaining = random.randint(3, 12)
+
+        # Break: 30-180 seconds between bursts
+        self.break_min = random.randint(30, 90)
+        self.break_max = random.randint(self.break_min + 15, 180)
+
+    # ------------------------------------------------------------------
+    # Fatigue
+    # ------------------------------------------------------------------
 
     def get_fatigue_multiplier(self) -> float:
-        """Calculate fatigue-based slowdown. Increases with tasks done."""
-        if self.tasks_this_session == 0:
-            return 1.0
-
-        fatigue = self.fatigue_level
-        # Fatigue grows with tasks and time-on-task
-        fatigue_increase = self.profile["fatigue_rate"] * self.tasks_this_session
-        self.fatigue_level = min(1.0, fatigue + fatigue_increase)
+        """Fatigue increases task time (slower as session progresses)."""
+        fatigue_increase = self.profile.get("fatigue_rate", 0.03) * self.tasks_this_session
+        self.fatigue_level = min(1.0, 0.0 + fatigue_increase)
 
         # Fatigue multiplier: 1.0 (none) to 2.5 (max)
         return 1.0 + (self.fatigue_level * 1.5)
+
+    # ------------------------------------------------------------------
+    # Warmup
+    # ------------------------------------------------------------------
 
     def get_warmup_multiplier(self) -> float:
         """Gradual ramp-up during warmup phase."""
@@ -244,6 +276,10 @@ class StealthEngine:
         progress = self.tasks_this_session / self.warmup_duration
         return 1.5 - (progress * 0.5)
 
+    # ------------------------------------------------------------------
+    # Timing Computation
+    # ------------------------------------------------------------------
+
     def get_seconds_per_question(self) -> float:
         """
         Calculate realistic per-question time in seconds.
@@ -251,9 +287,9 @@ class StealthEngine:
         Combines: baseline + TOD + fatigue + warmup + burst jitter
         Produces CV > 0.3 across task timings.
         """
-        base = self.profile["timing_baseline"]
+        base = self.timing_baseline
 
-        # Add substantial random variance (this creates high CV)
+        # Add substantial random variance (creates high CV)
         variance = random.gauss(0, base * 0.4)  # 40% standard deviation
         raw = base + variance
 
@@ -271,7 +307,7 @@ class StealthEngine:
 
         return round(final, 2)
 
-    def get_delay_between_tasks(self) -> float:
+    def delay_between_tasks(self) -> float:
         """
         Realistic inter-task delay in seconds.
 
@@ -334,7 +370,7 @@ class StealthEngine:
             return [], []
 
         # Base accuracy from profile tendency
-        base_accuracy = self.profile["accuracy_tendency"]
+        base_accuracy = self.accuracy_tendency
 
         # Add session-specific variance (±8%)
         variance = random.randint(-8, 8)
@@ -380,7 +416,6 @@ class StealthEngine:
             if idx < len(all_vocabs):
                 wrong_uids.append(all_vocabs[idx].get("uid", ""))
             else:
-                # Fallback: use a random vocab uid
                 rand_vocab = random.choice(all_vocabs) if all_vocabs else {}
                 wrong_uids.append(rand_vocab.get("uid", ""))
 
@@ -405,8 +440,6 @@ class StealthEngine:
 
     def _calculate_session_cv(self) -> Optional[float]:
         """Calculate Coefficient of Variation for this session's timings."""
-        # This would need actual timing data collected during the session
-        # Placeholder for now
         return None
 
     # ------------------------------------------------------------------
@@ -419,13 +452,37 @@ class StealthEngine:
         return random.random() < 0.02
 
     # ------------------------------------------------------------------
-    # Repr
+    # Utility
     # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
         return (
-            f"<StealthEngine {self.username} "
-            f"tasks={self.tasks_this_session} "
-            f"fatigue={self.fatigue_level:.2f} "
-            f"warming={'yes' if self.warming_up else 'no'}>"
+            f"StealthManager(uid={self.user_id}, "
+            f"baseline={self.timing_baseline:.1f}s, "
+            f"accuracy={self.accuracy_tendency}%, "
+            f"tasks={self.tasks_this_session}, "
+            f"fatigue={self.fatigue_level:.2f})"
         )
+
+
+def seconds_to_human(seconds: float) -> str:
+    """Convert seconds to a human-readable string."""
+    if seconds < 1:
+        return f"{int(seconds * 1000)}ms"
+    parts = []
+    numyears = int(seconds // 31536000)
+    numdays = int((seconds % 31536000) // 86400)
+    numhours = int(((seconds % 31536000) % 86400) // 3600)
+    numminutes = int((((seconds % 31536000) % 86400) % 3600) // 60)
+    numseconds = int((((seconds % 31536000) % 86400) % 3600) % 60)
+
+    if numyears:
+        parts.append(f"{numyears}y")
+    if numdays:
+        parts.append(f"{numdays}d")
+    if numhours:
+        parts.append(f"{numhours}h")
+    if numminutes:
+        parts.append(f"{numminutes}m")
+    parts.append(f"{numseconds}s")
+    return " ".join(parts)

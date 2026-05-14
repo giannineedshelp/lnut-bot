@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+import aiohttp
 
 # Auto-load .env file
 load_dotenv()
@@ -63,6 +64,7 @@ class LNutBot(commands.Bot):
 
     def __init__(self):
         self._config = Config()
+        self.aiohttp_session = None  # Set in setup_hook for async HTTP
 
         intents = discord.Intents.default()
         intents.message_content = True
@@ -80,57 +82,32 @@ class LNutBot(commands.Bot):
         self._last_status = "unknown"
 
     @property
-    def config(self) -> Config:
+    def config(self):
         return self._config
 
-    async def _load_extensions(self):
-        """Load command extensions that actually exist."""
-        extensions = ['commands.commands', 'commands.xp_commands']
-        loaded = 0
-        failed = 0
-        for ext in extensions:
+    # ─── Lifecycle ────────────────────────────────────────────────────────
+
+    async def setup_hook(self):
+        """Async initialisation: load cogs, create aiohttp session."""
+        # Create a shared aiohttp session for async API clients
+        self.aiohttp_session = aiohttp.ClientSession()
+
+        # Load all command cogs
+        cogs_to_load = [
+            "commands.commands",
+            "commands.xp_commands",
+        ]
+
+        for cog_path in cogs_to_load:
             try:
-                await self.load_extension(ext)
-                logger.info(f"  ✅ Loaded extension: {ext}")
-                loaded += 1
+                await self.load_extension(cog_path)
+                print(f"  ✅ Loaded {cog_path}")
+                logger.info(f"Loaded cog: {cog_path}")
             except Exception as e:
-                logger.error(f"  ❌ Failed to load extension {ext}: {e}")
-                failed += 1
-        logger.info(f"Extensions: {loaded} loaded, {failed} failed")
-        return loaded, failed
+                print(f"  ❌ Failed to load {cog_path}: {e}")
+                logger.error(f"Failed to load {cog_path}: {e}")
 
-    async def on_ready(self):
-        """Called when the bot is ready and connected to Discord."""
-        self.start_time = discord.utils.utcnow()
-
-        print()
-        print("═" * 50)
-        print(f"  🤖 Bot connected as {self.user} (ID: {self.user.id})")
-        print(f"  🌐 Connected to {len(self.guilds)} guild(s)")
-        print(f"  👤 Accounts configured: {len(self.config.accounts)}")
-        print("═" * 50)
-        print()
-
-        logger.info(f"Bot connected as {self.user} (ID: {self.user.id})")
-        logger.info(f"Connected to {len(self.guilds)} guild(s)")
-
-        # Load extensions now that the bot is connected
-        print("📦 Loading extensions...")
-        loaded, failed = await self._load_extensions()
-        print(f"📦 Done: {loaded} loaded, {failed} failed")
-        print()
-
-        # Set bot activity
-        await self.change_presence(
-            activity=discord.Activity(
-                type=discord.ActivityType.watching,
-                name="for language farming commands"
-            )
-        )
-        print("🎯 Activity set")
-
-        # Sync slash commands — cogs are loaded now
-        print("🔄 Syncing slash commands...")
+        # Sync application commands
         try:
             synced = await self.tree.sync()
             print(f"  ✅ Synced {len(synced)} slash command(s)")
@@ -141,16 +118,21 @@ class LNutBot(commands.Bot):
 
         # Start voice channel status updater
         self._status_task = self.loop.create_task(self._update_status_loop())
-        print("📊 Status updater task started")
+        print("  📊 Status updater task started")
 
-        # Send startup announcement
-        await self._send_announcement("startup")
+    async def on_ready(self):
+        """Called when the bot has connected and initialised."""
+        self.start_time = discord.utils.utcnow()
+        self._last_status = "connected"
 
         print()
         print("═" * 50)
         print(f"  ✅ Bot is ready! Logged in as {self.user}")
         print("═" * 50)
         print()
+
+        await self._update_voice_status("connected")
+        await self._send_announcement("startup")
 
     async def on_disconnect(self):
         """Called when the bot disconnects from Discord."""
@@ -179,7 +161,10 @@ class LNutBot(commands.Bot):
         announcements = {
             "startup": {
                 "title": "🟢 Bot Online",
-                "description": f"**LanguageNut Farmer** is now online!\nStarted at: {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                "description": (
+                    f"**LanguageNut Farmer** is now online!\n"
+                    f"Started at: {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                ),
                 "color": discord.Color.green()
             },
             "shutdown": {
@@ -189,12 +174,18 @@ class LNutBot(commands.Bot):
             },
             "disconnect": {
                 "title": "🟡 Bot Disconnected",
-                "description": f"**LanguageNut Farmer** lost connection to Discord at {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}.",
+                "description": (
+                    f"**LanguageNut Farmer** lost connection to Discord at "
+                    f"{discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}."
+                ),
                 "color": discord.Color.orange()
             },
             "reconnect": {
                 "title": "🟢 Bot Reconnected",
-                "description": f"**LanguageNut Farmer** has reconnected to Discord.\nTime: {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                "description": (
+                    f"**LanguageNut Farmer** has reconnected to Discord.\n"
+                    f"Time: {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                ),
                 "color": discord.Color.green()
             },
             "error": {
@@ -256,6 +247,7 @@ class LNutBot(commands.Bot):
             await asyncio.sleep(60)
 
     async def _update_voice_status(self, status: str):
+        """Update the voice channel name to reflect bot status."""
         if not self.config.status_channel_id:
             return
 
@@ -265,14 +257,14 @@ class LNutBot(commands.Bot):
 
         try:
             status_config = {
-                "connected": {"name": "🟢 Bot Online", "user_limit": 0},
-                "degraded": {"name": "🟠 Bot Degraded", "user_limit": 1},
-                "disconnected": {"name": "🔴 Bot Offline", "user_limit": 0},
-                "error": {"name": "🔴 Bot Error", "user_limit": 0},
-                "farming": {"name": "🟢 Farming Active", "user_limit": 0},
-                "idle": {"name": "🟡 Bot Idle", "user_limit": 1},
-                "maintenance": {"name": "🟠 Maintenance", "user_limit": 0},
-                "unknown": {"name": "⚪ Status Unknown", "user_limit": 0}
+                "connected":    {"name": "🟢 Bot Online",      "user_limit": 0},
+                "degraded":     {"name": "🟠 Bot Degraded",    "user_limit": 1},
+                "disconnected": {"name": "🔴 Bot Offline",     "user_limit": 0},
+                "error":        {"name": "🔴 Bot Error",       "user_limit": 0},
+                "farming":      {"name": "🟢 Farming Active",  "user_limit": 0},
+                "idle":         {"name": "🟡 Bot Idle",        "user_limit": 1},
+                "maintenance":  {"name": "🟠 Maintenance",     "user_limit": 0},
+                "unknown":      {"name": "⚪ Status Unknown",  "user_limit": 0},
             }
 
             config = status_config.get(status, status_config["unknown"])
@@ -295,6 +287,9 @@ class LNutBot(commands.Bot):
 
         if self._status_task:
             self._status_task.cancel()
+
+        if self.aiohttp_session and not self.aiohttp_session.closed:
+            await self.aiohttp_session.close()
 
         await self._send_announcement("shutdown")
         await self._update_voice_status("maintenance")

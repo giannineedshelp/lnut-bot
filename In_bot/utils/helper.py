@@ -1,6 +1,8 @@
 import math
 import random
 from datetime import datetime, timedelta, timezone
+
+
 def _pct(task: dict) -> int:
     """Safely extract completion percentage from a task as an int (0-100)."""
     gr = task.get("gameResults")
@@ -16,8 +18,6 @@ def _pct(task: dict) -> int:
 def _is_done(task: dict) -> bool:
     """A task is done when its completion percentage is >= 100."""
     return _pct(task) >= 100
-
-
 
 
 def extract_task_id(task) -> str:
