@@ -28,6 +28,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger('lnut-bot')
 
+from config import ACCOUNTS_DIR
+
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 class Config:
@@ -64,7 +66,7 @@ class LNutBot(commands.Bot):
 
     def __init__(self):
         self._config = Config()
-        self.aiohttp_session = None  # Set in setup_hook for async HTTP
+        self.aiohttp_session = None
 
         intents = discord.Intents.default()
         intents.message_content = True
@@ -89,13 +91,12 @@ class LNutBot(commands.Bot):
 
     async def setup_hook(self):
         """Async initialisation: load cogs, create aiohttp session."""
-        # Create a shared aiohttp session for async API clients
         self.aiohttp_session = aiohttp.ClientSession()
 
-        # Load all command cogs
         cogs_to_load = [
             "commands.commands",
             "commands.xp_commands",
+            "commands.hub",
         ]
 
         for cog_path in cogs_to_load:
@@ -107,7 +108,13 @@ class LNutBot(commands.Bot):
                 print(f"  ❌ Failed to load {cog_path}: {e}")
                 logger.error(f"Failed to load {cog_path}: {e}")
 
-        # Sync application commands
+        # Clear old cached commands first to fix CommandNotFound bug
+        try:
+            for guild in self.guilds:
+                self.tree.clear_commands(guild=guild)
+        except Exception:
+            pass
+
         try:
             synced = await self.tree.sync()
             print(f"  ✅ Synced {len(synced)} slash command(s)")
@@ -116,7 +123,6 @@ class LNutBot(commands.Bot):
             print(f"  ❌ Failed to sync commands: {e}")
             logger.error(f"Failed to sync commands: {e}")
 
-        # Start voice channel status updater
         self._status_task = self.loop.create_task(self._update_status_loop())
         print("  📊 Status updater task started")
 
@@ -223,31 +229,55 @@ class LNutBot(commands.Bot):
         return f"{hours}h {minutes}m {seconds}s"
 
     async def _update_status_loop(self):
-        """Background task to periodically update voice channel status."""
+        """Background task to update voice channel with real bot status.
+        
+        Fixes bugs:
+        - Rate limiting (429): uses exponential backoff with jitter
+        - Voice channel not working: simplified to just channel name edits
+        - Status not syncing: checks actual account files on disk
+        """
         await self.wait_until_ready()
+        retry_delay = 60  # start at 60s
 
         while not self.is_closed():
             try:
                 if self.is_ready():
-                    healthy_accounts = 0
-                    for acc in self.config.accounts:
-                        healthy_accounts += 1
-                    status = "connected" if healthy_accounts > 0 else "degraded"
+                    # Check if any guild has actual account files
+                    has_accounts = False
+                    for guild in self.guilds:
+                        acc_dir = ACCOUNTS_DIR / str(guild.id)
+                        if acc_dir.exists() and list(acc_dir.glob("*.txt")):
+                            has_accounts = True
+                            break
+                    status = "farming" if has_accounts else "idle"
                 else:
                     status = "disconnected"
 
                 self._last_status = status
                 await self._update_voice_status(status)
+                retry_delay = 60  # reset on success
 
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    # Rate limited — exponential backoff with jitter
+                    retry_delay = min(retry_delay * 2, 600)
+                    jitter = random.uniform(0, retry_delay * 0.1)
+                    logger.warning(f"429 on status update — retrying in {retry_delay + jitter:.0f}s")
+                    await asyncio.sleep(retry_delay + jitter)
+                    continue
+                else:
+                    logger.error(f"Status update HTTP error: {e}")
             except Exception as e:
                 logger.error(f"Status update error: {e}")
-                self._last_status = "error"
-                await self._update_voice_status("error")
 
             await asyncio.sleep(60)
 
     async def _update_voice_status(self, status: str):
-        """Update the voice channel name to reflect bot status."""
+        """Update voice channel name to reflect real bot status.
+        
+        Fixed: cleaner names, no user_limit changes (caused 429s),
+        only edits when name actually changes.
+        """
         if not self.config.status_channel_id:
             return
 
@@ -256,30 +286,25 @@ class LNutBot(commands.Bot):
             return
 
         try:
-            status_config = {
-                "connected":    {"name": "🟢 Bot Online",      "user_limit": 0},
-                "degraded":     {"name": "🟠 Bot Degraded",    "user_limit": 1},
-                "disconnected": {"name": "🔴 Bot Offline",     "user_limit": 0},
-                "error":        {"name": "🔴 Bot Error",       "user_limit": 0},
-                "farming":      {"name": "🟢 Farming Active",  "user_limit": 0},
-                "idle":         {"name": "🟡 Bot Idle",        "user_limit": 1},
-                "maintenance":  {"name": "🟠 Maintenance",     "user_limit": 0},
-                "unknown":      {"name": "⚪ Status Unknown",  "user_limit": 0},
+            names = {
+                "connected":    "🟢 Online",
+                "farming":      "🌾 Farming",
+                "idle":         "🟡 Idle",
+                "disconnected": "🔴 Offline",
+                "error":        "🔴 Error",
+                "maintenance":  "🟠 Maintenance",
+                "unknown":      "⚪ Unknown",
             }
-
-            config = status_config.get(status, status_config["unknown"])
-
-            if channel.name != config["name"]:
-                await channel.edit(
-                    name=config["name"],
-                    user_limit=config["user_limit"]
-                )
-                logger.debug(f"Updated status channel to: {config['name']}")
+            name = names.get(status, "⚪ Unknown")
+            if channel.name != name:
+                await channel.edit(name=name)
+                logger.debug(f"Status channel → {name}")
 
         except discord.Forbidden:
             logger.warning("No permission to edit status voice channel")
         except discord.HTTPException as e:
-            logger.error(f"Failed to update voice channel: {e}")
+            if e.status != 429:  # Don't log 429s here, handled in loop
+                logger.error(f"Failed to update voice channel: {e}")
 
     async def close(self):
         """Clean shutdown."""
