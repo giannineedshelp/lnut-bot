@@ -1,8 +1,4 @@
-"""
-main.py — LanguageNut Farming Bot
-Discord bot with stealth anti-detection, announcements channel,
-voice channel status indicator, and comprehensive UI.
-"""
+"""main.py — LanguageNut Farming Bot"""
 import os
 import sys
 import asyncio
@@ -14,10 +10,8 @@ from discord.ext import commands
 from dotenv import load_dotenv
 import aiohttp
 
-# Auto-load .env file
 load_dotenv()
 
-# Set up logging
 from pathlib import Path
 logging.basicConfig(
     level=logging.INFO,
@@ -31,23 +25,17 @@ logger = logging.getLogger('lnut-bot')
 
 import random
 
-# ─── Config ──────────────────────────────────────────────────────────────────
-
 class Config:
-    """Bot configuration loaded from environment."""
-
     def __init__(self):
         self.token = os.getenv('DISCORD_TOKEN', '')
         self.prefix = os.getenv('COMMAND_PREFIX', '!')
         self.announce_channel_id = int(os.getenv('ANNOUNCE_CHANNEL_ID', '0'))
         self.status_channel_id = int(os.getenv('BOT_STATUS_CHANNEL_ID', '0'))
         self.accounts = self._load_accounts()
-
         if not self.token:
             raise ValueError("DISCORD_TOKEN not set in environment")
 
     def _load_accounts(self) -> list:
-        """Load accounts from environment variables."""
         accounts = []
         i = 1
         while True:
@@ -59,15 +47,13 @@ class Config:
             i += 1
         return accounts
 
-
-# ─── Bot Class ───────────────────────────────────────────────────────────────
-
 class LNutBot(commands.Bot):
-    """Main bot class with lifecycle management and status reporting."""
-
     def __init__(self):
         self._config = Config()
         self.aiohttp_session = None
+        self._last_status = "unknown"
+        self.start_time = None
+        self._status_task = None
 
         intents = discord.Intents.default()
         intents.message_content = True
@@ -76,90 +62,79 @@ class LNutBot(commands.Bot):
 
         super().__init__(
             command_prefix=commands.when_mentioned_or(self._config.prefix),
-            intents=intents,
-            help_command=None
+            intents=intents
         )
-
-        self.start_time = None
-        self._status_task = None
-        self._last_status = "unknown"
 
     @property
     def config(self):
         return self._config
 
-    # ─── Lifecycle ────────────────────────────────────────────────────────
-
     async def setup_hook(self):
-        """Async initialisation: load cogs, create aiohttp session."""
+        self.start_time = discord.utils.utcnow()
         self.aiohttp_session = aiohttp.ClientSession()
 
-        cogs_to_load = [
+        # Load cogs
+        initial_extensions = [
             "commands.commands",
             "commands.xp_commands",
             "commands.hub",
         ]
-
-        for cog_path in cogs_to_load:
+        for ext in initial_extensions:
             try:
-                await self.load_extension(cog_path)
-                print(f"  ✅ Loaded {cog_path}")
-                logger.info(f"Loaded cog: {cog_path}")
+                await self.load_extension(ext)
+                print(f"  Loaded {ext}")
+                logger.info(f"Loaded cog: {ext}")
             except Exception as e:
-                print(f"  ❌ Failed to load {cog_path}: {e}")
-                logger.error(f"Failed to load {cog_path}: {e}")
+                print(f"  Failed to load {ext}: {e}")
+                logger.error(f"Failed to load {ext}: {e}")
 
-        # Clear old cached commands first to fix CommandNotFound bug
-        try:
-            for guild in self.guilds:
-                self.tree.clear_commands(guild=guild)
-        except Exception:
-            pass
-
+        # Sync commands
         try:
             synced = await self.tree.sync()
-            print(f"  ✅ Synced {len(synced)} slash command(s)")
+            print(f"  Synced {len(synced)} slash command(s)")
             logger.info(f"Synced {len(synced)} slash command(s)")
         except Exception as e:
-            print(f"  ❌ Failed to sync commands: {e}")
+            print(f"  Failed to sync commands: {e}")
             logger.error(f"Failed to sync commands: {e}")
 
+        # Start status loop
         self._status_task = self.loop.create_task(self._update_status_loop())
-        print("  📊 Status updater task started")
+        print("  Status updater task started")
 
     async def on_ready(self):
-        """Called when the bot has connected and initialised."""
-        self.start_time = discord.utils.utcnow()
-        self._last_status = "connected"
-
-        print()
-        print("═" * 50)
-        print(f"  ✅ Bot is ready! Logged in as {self.user}")
-        print("═" * 50)
-        print()
-
-        await self._update_voice_status("connected")
+        print(f"\n{'=' * 50}")
+        print(f"  Bot is ready! Logged in as {self.user}")
+        print(f"{'=' * 50}\n")
         await self._send_announcement("startup")
+        await self._update_voice_status("connected")
 
     async def on_disconnect(self):
-        """Called when the bot disconnects from Discord."""
         self._last_status = "disconnected"
-        await self._update_voice_status("disconnected")
-        await self._send_announcement("disconnect")
-        print("🔴 Bot disconnected from Discord")
+        try:
+            await self._update_voice_status("disconnected")
+        except Exception:
+            pass
+        try:
+            await self._send_announcement("disconnect")
+        except Exception:
+            pass
+        print("Bot disconnected from Discord")
 
     async def on_resumed(self):
-        """Called when the bot reconnects after a disconnect."""
         self._last_status = "connected"
-        await self._update_voice_status("connected")
-        await self._send_announcement("reconnect")
-        print("🟢 Bot reconnected to Discord")
+        try:
+            await self._update_voice_status("connected")
+        except Exception:
+            pass
+        try:
+            await self._send_announcement("reconnect")
+        except Exception:
+            pass
+        print("Bot reconnected to Discord")
 
-    async def _send_announcement(self, event_type: str):
-        """Send an announcement to the configured announcements channel."""
+    async def _send_announcement(self, event_type: str, retry_seconds: int = 0):
         if not self.config.announce_channel_id:
             return
-
         channel = self.get_channel(self.config.announce_channel_id)
         if not channel:
             logger.warning(f"Announcement channel {self.config.announce_channel_id} not found")
@@ -167,7 +142,7 @@ class LNutBot(commands.Bot):
 
         announcements = {
             "startup": {
-                "title": "🟢 Bot Online",
+                "title": "Bot Online",
                 "description": (
                     f"**LanguageNut Farmer** is now online!\n"
                     f"Started at: {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
@@ -175,45 +150,51 @@ class LNutBot(commands.Bot):
                 "color": discord.Color.green()
             },
             "shutdown": {
-                "title": "🔴 Bot Offline",
-                "description": "**LanguageNut Farmer** is going offline for maintenance/restart.",
+                "title": "Bot Offline",
+                "description": "**LanguageNut Farmer** is going offline.",
                 "color": discord.Color.red()
             },
             "disconnect": {
-                "title": "🟡 Bot Disconnected",
+                "title": "Bot Disconnected",
                 "description": (
-                    f"**LanguageNut Farmer** lost connection to Discord at "
+                    f"**LanguageNut Farmer** lost connection at "
                     f"{discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}."
                 ),
                 "color": discord.Color.orange()
             },
             "reconnect": {
-                "title": "🟢 Bot Reconnected",
+                "title": "Bot Reconnected",
                 "description": (
-                    f"**LanguageNut Farmer** has reconnected to Discord.\n"
+                    f"**LanguageNut Farmer** reconnected.\n"
                     f"Time: {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
                 ),
                 "color": discord.Color.green()
             },
             "error": {
-                "title": "🔴 Bot Error",
-                "description": "**LanguageNut Farmer** encountered an error. Check logs for details.",
+                "title": "Bot Error",
+                "description": "**LanguageNut Farmer** error. Check logs.",
                 "color": discord.Color.red()
-            }
+            },
+            "rate_limit": {
+                "title": "Rate Limited",
+                "description": (
+                    f"**LanguageNut Farmer** hit a rate limit (429).\n"
+                    f"Retrying in **{retry_seconds}s** - {discord.utils.utcnow().strftime('%H:%M:%S UTC')}"
+                ),
+                "color": discord.Color.orange()
+            },
         }
 
         info = announcements.get(event_type, announcements['startup'])
-
         embed = discord.Embed(
             title=info['title'],
             description=info['description'],
             color=info['color'],
             timestamp=discord.utils.utcnow()
         )
-
         embed.add_field(name="Accounts", value=str(len(self.config.accounts)), inline=True)
         embed.add_field(name="Uptime", value=self._get_uptime(), inline=True)
-        embed.set_footer(text="LanguageNut Farmer • Status Monitor")
+        embed.set_footer(text="LanguageNut Farmer - Status Monitor")
 
         try:
             await channel.send(embed=embed)
@@ -221,7 +202,6 @@ class LNutBot(commands.Bot):
             logger.error(f"Failed to send announcement: {e}")
 
     def _get_uptime(self) -> str:
-        """Get a human-readable uptime string."""
         if not self.start_time:
             return "N/A"
         delta = discord.utils.utcnow() - self.start_time
@@ -230,20 +210,14 @@ class LNutBot(commands.Bot):
         return f"{hours}h {minutes}m {seconds}s"
 
     async def _update_status_loop(self):
-        """Background task to update voice channel with real bot status.
-        
-        Fixes bugs:
-        - Rate limiting (429): uses exponential backoff with jitter
-        - Voice channel not working: simplified to just channel name edits
-        - Status not syncing: checks actual account files on disk
-        """
+        """Background task - announces rate limit retry timers."""
         await self.wait_until_ready()
-        retry_delay = 60  # start at 60s
+        retry_delay = 60
+        last_announcement_tag = ""
 
         while not self.is_closed():
             try:
                 if self.is_ready():
-                    # Check if any guild has actual account files
                     has_accounts = False
                     for guild in self.guilds:
                         acc_dir = Path("accounts") / str(guild.id)
@@ -256,74 +230,73 @@ class LNutBot(commands.Bot):
 
                 self._last_status = status
                 await self._update_voice_status(status)
-                retry_delay = 60  # reset on success
+                retry_delay = 60
 
             except discord.HTTPException as e:
                 if e.status == 429:
-                    # Rate limited — exponential backoff with jitter
                     retry_delay = min(retry_delay * 2, 600)
                     jitter = random.uniform(0, retry_delay * 0.1)
-                    logger.warning(f"429 on status update — retrying in {retry_delay + jitter:.0f}s")
-                    await asyncio.sleep(retry_delay + jitter)
+                    total_sleep = retry_delay + jitter
+                    logger.warning(f"429 on status update - retrying in {total_sleep:.0f}s")
+
+                    tag = f"429-{int(total_sleep)}"
+                    if tag != last_announcement_tag:
+                        last_announcement_tag = tag
+                        await self._send_announcement("rate_limit", retry_seconds=int(total_sleep))
+
+                    await asyncio.sleep(total_sleep)
                     continue
                 else:
                     logger.error(f"Status update HTTP error: {e}")
+                    retry_delay = 60
             except Exception as e:
                 logger.error(f"Status update error: {e}")
+                retry_delay = 60
 
             await asyncio.sleep(60)
 
     async def _update_voice_status(self, status: str):
-        """Update voice channel name to reflect real bot status.
-        
-        Fixed: cleaner names, no user_limit changes (caused 429s),
-        only edits when name actually changes.
-        """
         if not self.config.status_channel_id:
             return
-
         channel = self.get_channel(self.config.status_channel_id)
         if not channel or not isinstance(channel, discord.VoiceChannel):
             return
-
         try:
             names = {
-                "connected":    "🟢 Online",
-                "farming":      "🌾 Farming",
-                "idle":         "🟡 Idle",
-                "disconnected": "🔴 Offline",
-                "error":        "🔴 Error",
-                "maintenance":  "🟠 Maintenance",
-                "unknown":      "⚪ Unknown",
+                "connected":    "Online",
+                "farming":      "Farming",
+                "idle":         "Idle",
+                "disconnected": "Offline",
+                "error":        "Error",
+                "maintenance":  "Maintenance",
+                "unknown":      "Unknown",
             }
-            name = names.get(status, "⚪ Unknown")
+            name = names.get(status, "Unknown")
             if channel.name != name:
                 await channel.edit(name=name)
-                logger.debug(f"Status channel → {name}")
-
         except discord.Forbidden:
             logger.warning("No permission to edit status voice channel")
         except discord.HTTPException as e:
-            if e.status != 429:  # Don't log 429s here, handled in loop
+            if e.status != 429:
                 logger.error(f"Failed to update voice channel: {e}")
 
     async def close(self):
-        """Clean shutdown."""
         logger.info("Bot shutting down...")
-
         if self._status_task:
             self._status_task.cancel()
-
         if self.aiohttp_session and not self.aiohttp_session.closed:
             await self.aiohttp_session.close()
-
-        await self._send_announcement("shutdown")
-        await self._update_voice_status("maintenance")
-
+        try:
+            await self._send_announcement("shutdown")
+        except Exception:
+            pass
+        try:
+            await self._update_voice_status("maintenance")
+        except Exception:
+            pass
         await super().close()
 
     def run(self):
-        """Start the bot."""
         try:
             super().run(self.config.token, reconnect=True)
         except KeyboardInterrupt:
@@ -331,15 +304,11 @@ class LNutBot(commands.Bot):
         finally:
             logger.info("Bot stopped")
 
-
-# ─── Entry Point ─────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     print()
-    print("═" * 50)
-    print("  🚀 LanguageNut Farmer Bot")
-    print("═" * 50)
+    print("=" * 50)
+    print("  LanguageNut Farmer Bot")
+    print("=" * 50)
     print()
-
     bot = LNutBot()
     bot.run()
