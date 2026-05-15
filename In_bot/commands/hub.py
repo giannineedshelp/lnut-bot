@@ -1,17 +1,15 @@
 """hub.py — Hub views for LNutBot (fixed)."""
-
 import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import aiohttp
 import discord
 from discord import Interaction, app_commands, ui
 from discord.ext import commands
 
-from utils.logger import logger
+logger = logging.getLogger(__name__)
 
 OWNER_ID = 1453752725324955656
 ACCOUNTS_DIR = Path("accounts")
@@ -21,8 +19,6 @@ RED = discord.Colour(0xFF0044)
 BLUE = discord.Colour(0x0088FF)
 AMBER = discord.Colour(0xFFAA00)
 PURPLE = discord.Colour(0x8844FF)
-
-# ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def get_guild_accounts_dir(guild_id: Optional[int]) -> Path:
     if guild_id is None:
@@ -64,32 +60,30 @@ def save_account(guild_id: Optional[int], username: str, password: str) -> str:
     return f"+ Account **{username}** saved as `{file_path.name}`."
 
 async def do_login(username: str, password: str) -> tuple:
-    """Login via aiohttp directly (no sync client)."""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.languagenut.com/loginController/attemptLogin",
-                json={"username": username, "pass": password},
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                    "Content-Type": "application/json",
-                    "Origin": "https://www.languagenut.com",
-                    "Referer": "https://www.languagenut.com/",
-                },
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("newToken"):
-                        return True, data["newToken"]
-                    return False, f"No token: {str(data)[:200]}"
-                else:
-                    text = await resp.text()
-                    return False, f"HTTP {resp.status}: {text[:200]}"
-    except asyncio.TimeoutError:
-        return False, "Request timed out"
-    except aiohttp.ClientConnectorError as e:
-        return False, f"Connection error: {e.strerror or str(e)[:100]}"
+        import curl_cffi.requests as cr
+    except ImportError:
+        import requests as cr
+    try:
+        resp = cr.post(
+            "https://api.languagenut.com/loginController/attemptLogin",
+            json={"username": username, "password": password},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Content-Type": "application/json",
+                "Origin": "https://www.languagenut.com",
+                "Referer": "https://www.languagenut.com/",
+            },
+            timeout=30
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            token = data.get("token") or data.get("newToken")
+            if token:
+                return True, token
+            return False, f"No token: {str(data)[:200]}"
+        else:
+            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
     except Exception as e:
         return False, f"{type(e).__name__}: {str(e)[:200]}"
 
@@ -100,8 +94,6 @@ def build_hub_embed(guild_id: Optional[int]) -> discord.Embed:
     embed.add_field(name="Status", value=f"Accounts: **{total}** loaded", inline=False)
     embed.set_footer(text="Use the buttons below.")
     return embed
-
-# ─── HelpView ────────────────────────────────────────────────────────────────
 
 class HelpView(ui.View):
     def __init__(self):
@@ -122,10 +114,8 @@ class HelpView(ui.View):
         embed.add_field(name="/login", value="Log in manually", inline=False)
         embed.add_field(name="/settings", value="Configure guild", inline=False)
         embed.add_field(name="/health", value="Check account health", inline=False)
-        embed.add_field(name="/admin", value="Owner only panel", inline=False)
+        embed.add_field(name="/admin", value="Owner panel", inline=False)
         await interaction.response.edit_message(embed=embed, view=self)
-
-# ─── LoginModal ──────────────────────────────────────────────────────────────
 
 class LoginModal(ui.Modal, title="LanguageNut Login"):
     username = ui.TextInput(label="Username", placeholder="Your LN username...", required=True)
@@ -156,8 +146,6 @@ class LoginModal(ui.Modal, title="LanguageNut Login"):
         else:
             embed = discord.Embed(title="Login Failed", description=f"**{usr}**\nError: {result}", color=RED)
             await interaction.followup.send(embed=embed, ephemeral=True)
-
-# ─── HubView ─────────────────────────────────────────────────────────────────
 
 class HubView(ui.View):
     def __init__(self, guild_id: Optional[int]):
@@ -200,7 +188,6 @@ class HubView(ui.View):
             embed = discord.Embed(title="Health Check", description=f"Error: {e}", color=RED)
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
-
         ok, msg = await do_login(uname, pwd)
         if ok:
             embed = discord.Embed(title="Health Check - Healthy",
@@ -231,8 +218,6 @@ class HubView(ui.View):
         embed = build_hub_embed(self.guild_id)
         view = HubView(self.guild_id)
         await interaction.response.edit_message(embed=embed, view=view)
-
-# ─── AdminView ───────────────────────────────────────────────────────────────
 
 class AdminView(ui.View):
     def __init__(self):
@@ -302,8 +287,6 @@ class AdminView(ui.View):
     async def shutdown_btn(self, interaction: Interaction, button: ui.Button):
         await interaction.response.send_message("Shutting down...", ephemeral=True)
         await interaction.client.close()
-
-# ─── Cog ─────────────────────────────────────────────────────────────────────
 
 class HubCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
