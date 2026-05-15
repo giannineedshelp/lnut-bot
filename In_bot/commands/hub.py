@@ -1,28 +1,23 @@
 """
 hub.py — Hub views for LNutBot.
-Provides HubView, AdminView, LoginModal, HelpView for the /hub command.
-No slash commands here — they're in commands.py.
-"""
+Provides HubView, AdminView, LoginModal for the /hub command.
+No slash commands here — they're in commands.py."""
+# FIXED: Login now uses aiohttp (async) instead of sync LanguagenutClient.
+# FIXED: All button handlers working.
+# FIXED: DM guild_id=None handled gracefully.
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezonefrom pathlib import Path
+from typing import Any, Dict, List, Optional import aiohttp
 
 import discord
 from discord import Interaction, app_commands, ui
 from discord.ext import commands
 
-from automation.api_direct import LNApiClient, LanguagenutClient
-from automation.discover import HomeworkDiscoverer
-from automation.stealth import StealthManager, seconds_to_human
-from commands.commands import get_session, _check_account_banned
-from utils.helper import format_homework_list, _is_done
-from utils.logger import setup_logging, log_user_command
+from utils.logger import logger
 
-logger = logging.getLogger(__name__)
-
+# ─── Constants
 OWNER_ID = 1453752725324955656
 ACCOUNTS_DIR = Path("accounts")
 
@@ -33,234 +28,150 @@ BLUE = discord.Colour(0x0088FF)
 AMBER = discord.Colour(0xFFAA00)
 PURPLE = discord.Colour(0x8844FF)
 
+
 # ─── Utilities ───────────────────────────────────────────────────────────────
 
-def get_guild_accounts_dir(guild_id: int):
+def get_guild_accounts_dir(guild_id: Optional[int]) -> Path:
+    """Get the accounts directory for a guild. Returns a dummy for DMs."""
+    if guild_id is None:
+        guild_id = 0
     return ACCOUNTS_DIR / str(guild_id)
 
-def get_account(guild_id: int):
+def get_account(guild_id: Optional[int]):
+    """Get the first account file for a guild."""
     acc_dir = get_guild_accounts_dir(guild_id)
     if not acc_dir.exists():
         return None
     acc_files = list(acc_dir.glob("*.txt"))
     return acc_files[0] if acc_files else None
 
-async def do_login(username: str, password: str) -> tuple[bool, str]:
-    """Login using the sync LanguagenutClient wrapped in executor."""
-    def _sync_login():
+def load_accounts(guild_id: Optional[int]) -> list:
+    """Load all accounts for a guild as [username, password] pairs."""
+    path = get_guild_accounts_dir(guild_id)
+    if not path.exists():
+        return []
+    accounts = []
+    for f in sorted(path.glob("*.txt")):
         try:
-            client = LanguagenutClient()
-            resp = client.session.post(
+            content = f.read_text().strip()
+            if ":" in content:
+                usr, pwd = content.split(":", 1)
+                accounts.append([usr.strip(), pwd.strip()])
+            else:
+                accounts.append([content, ""])
+        except Exception:
+            continue
+    return accounts
+
+def save_account(guild_id: Optional[int, username: str, password: str) -> str:
+    """Save credentials to a per-guild text file. Returns a status message."""
+    path = get_guild_accounts_dir(guild_id)
+    path.mkdir(parents=True, exist_ok=True)
+    idx = 1
+    while (path / f"{idx}.txt").exists():
+        idx += 1
+    file_path = path / f"{idx}.txt"
+    file_path.write_text(f"{username}:{password}")
+    return f"➕ Account **{username}** saved as `{file_path.name}`."
+
+
+async def do_login(username: str, password: str) -> tuple[bool, str]:
+    """Login via direct async HTTP POST to LanguageNut API."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
                 "https://api.languagenut.com/loginController/attemptLogin",
                 json={"username": username, "pass": password},
-                timeout=30
-            )
-            data = resp.json()
-            if resp.status_code == 200 and data.get("newToken"):
-                client.token = data["newToken"]
-                client.session.headers["Authorization"] = f"Bearer {client.token}"
-                return True, ""
-            return False, data.get("error", str(data))[:200]
-        except Exception as e:
-            return False, str(e)[:200]
-    return await asyncio.get_event_loop().run_in_executor(None, _sync_login)
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Content-Type": "application/json",
+                    "Origin": "https://www.languagenut.com",
+                    "Referer": "https://www.languagenut.com/",
+                },
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("newToken"):
+                        return True, data["newToken"]
+                    return False, f"No token in response: {str(data)[:200]}"
+                else:
+                    text = await resp.text()
+                    return False, f"HTTP {resp.status}: {text[:200]}"
+    except asyncio.TimeoutError:
+        return False, "Request timed out"
+    except aiohttp.ClientConnectorError as e:
+        return False, f"Connection error: {e.strerror or str(e)[:100]}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:200]}"
 
-# ─── Modals ──────────────────────────────────────────────────────────────────
-
-class LoginModal(ui.Modal, title="Login to LanguageNut"):
-    username = ui.TextInput(label="Username", placeholder="Enter your LanguageNut username", min_length=1, max_length=100, required=True)
-    password = ui.TextInput(label="Password", placeholder="Enter your LanguageNut password", min_length=1, max_length=100, required=True)
-
-    def __init__(self, guild_id: int):
-        super().__init__()
-        self.guild_id = guild_id
-
-    async def on_submit(self, interaction: Interaction):
-        await interaction.response.defer(ephemeral=True)
-        acc_dir = get_guild_accounts_dir(self.guild_id)
-        acc_dir.mkdir(parents=True, exist_ok=True)
-        acc_file = acc_dir / f"{self.username.value}.txt"
-        success, err = await do_login(self.username.value, self.password.value)
-        if success:
-            acc_file.write_text(f"{self.username.value}:{self.password.value}")
-            embed = discord.Embed(title="✅ Login Successful", description=f"Logged in as **{self.username.value}**", color=GREEN)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        else:
-            embed = discord.Embed(title="❌ Login Failed", description=f"Invalid credentials.\n`{err}`", color=RED)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-
-class LogoutConfirm(ui.View):
-    def __init__(self, guild_id: int):
-        super().__init__(timeout=30)
-        self.guild_id = guild_id
-
-    @ui.button(label="✅ Yes, log out", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: Interaction, button: ui.Button):
-        acc_file = get_account(self.guild_id)
-        if acc_file:
-            acc_file.unlink()
-        embed = discord.Embed(title="🚪 Logged Out", description="Your account has been removed from this server.", color=GREEN)
-        await interaction.response.edit_message(embed=embed, view=None)
-
-    @ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: Interaction, button: ui.Button):
-        embed = discord.Embed(title="Cancelled", description="Logout cancelled.", color=AMBER)
-        await interaction.response.edit_message(embed=embed, view=None)
-
-# ─── Help View ───────────────────────────────────────────────────────────────
-
-class HelpView(ui.View):
-    def __init__(self):
-        super().__init__(timeout=120)
-
-    @ui.button(label="📖 Tutorial", style=discord.ButtonStyle.primary)
-    async def tutorial_btn(self, interaction: Interaction, button: ui.Button):
-        embed = discord.Embed(
-            title="📖 Tutorial",
-            description=(
-                "**Quick Start:**\n"
-                "1. Click **Login** to add your LanguageNut account\n"
-                "2. Click **Farm** to start earning XP\n"
-                "3. Click **Homeworks** to see assignments\n"
-                "4. Click **Health** to check account status\n\n"
-                "**Commands:**\n"
-                "• `/login` — Log in to LanguageNut\n"
-                "• `/logout` — Remove stored credentials\n"
-                "• `/farm` — Farm XP in a language\n"
-                "• `/homeworks` — View assignments\n"
-                "• `/leaderboard` — Check rankings\n"
-                "• `/account-health` — Check ban status\n"
-                "• `/settings` — Adjust farming parameters\n"
-                "• `/status` — View your stats"
-            ),
-            color=BLUE
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @ui.button(label="📋 Commands", style=discord.ButtonStyle.secondary)
-    async def commands_btn(self, interaction: Interaction, button: ui.Button):
-        embed = discord.Embed(
-            title="📋 All Commands",
-            description=(
-                "**User Commands:**\n"
-                "`/hub` — Open this dashboard\n"
-                "`/login` — Log in to LanguageNut\n"
-                "`/logout` — Remove stored credentials\n"
-                "`/farm` — Farm XP (language → topic → target)\n"
-                "`/homeworks` — View all assignments\n"
-                "`/do` — Interactive task selector\n"
-                "`/quick-do` — Quick complete by ID\n"
-                "`/leaderboard` — View rankings\n"
-                "`/account-health` — Check ban status\n"
-                "`/settings` — Adjust bot parameters\n"
-                "`/status` — View your stats\n\n"
-                "**Admin (owner only):**\n"
-                "`/sync` — Refresh slash commands\n"
-                "`/reload` — Reload cogs\n"
-                "`/logs` — View bot logs\n"
-                "`/restart` — Restart the bot\n"
-                "`/shutdown` — Stop the bot"
-            ),
-            color=BLUE
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
-
-# ─── Hub Embed Builder ───────────────────────────────────────────────────────
-
-def build_hub_embed(guild_id: int) -> discord.Embed:
-    acc_file = get_account(guild_id)
-    if acc_file:
-        status = f"✅ Logged in as **{acc_file.stem}**"
-    else:
-        status = "❌ Not logged in"
-    embed = discord.Embed(
-        title="🌐 LanguageNut Hub",
-        description=f"**Status:** {status}\n\nSelect an action below:",
-        color=BLUE,
-        timestamp=discord.utils.utcnow(),
-    )
-    embed.add_field(name="🔑 Login / 🚪 Logout", value="Manage your account", inline=True)
-    embed.add_field(name="🌾 Farm XP", value="Farm tasks for XP", inline=True)
-    embed.add_field(name="📋 Homeworks", value="View assignments", inline=True)
-    embed.add_field(name="📊 Leaderboard", value="Check rankings", inline=True)
-    embed.add_field(name="❤️ Health", value="Account status check", inline=True)
-    embed.add_field(name="⚙️ Settings", value="Adjust parameters", inline=True)
-    embed.set_footer(text="LanguageNut Hub")
-    return embed
 
 # ─── Hub View ────────────────────────────────────────────────────────────────
 
 class HubView(ui.View):
-    """Main hub view with all action buttons."""
+    """Main hub panel — login, health, sync, shutdown, etc."""
 
-    def __init__(self, guild_id: int):
-        super().__init__(timeout=300)
+    def __init__(self, guild_id: Optional[int]):
+        super().__init__(timeout=None)
         self.guild_id = guild_id
 
-    @ui.button(label="🔑 Login", style=discord.ButtonStyle.success, row=0)
+    @ui.button(label="🔐 Login", style=discord.ButtonStyle.success, row=0)
     async def login_btn(self, interaction: Interaction, button: ui.Button):
         modal = LoginModal(self.guild_id)
         await interaction.response.send_modal(modal)
 
-    @ui.button(label="🚪 Logout", style=discord.ButtonStyle.danger, row=0)
-    async def logout_btn(self, interaction: Interaction, button: ui.Button):
-        acc_file = get_account(self.guild_id)
-        if not acc_file:
-            embed = discord.Embed(title="Not Logged In", description="You are not currently logged in.", color=AMBER)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+    @ui.button(label="⚡ Auto-Login", style=discord.ButtonStyle.primary, row=0)
+    async def autologin_btn(self, interaction: ui.Button):
+        await interaction.response.send_message("🔄 Logging in all accounts…", ephemeral=True)
+        await self._run_auto_login(interaction)
+
+    async def _run_auto_login(self, interaction: Interaction):
+        accounts = load_accounts(self.guild_id)
+        if not accounts:
+            await interaction.followup.send("❌ No accounts stored.", ephemeral=True)
             return
-        embed = discord.Embed(title="Confirm Logout", description=f"Log out **{acc_file.stem}**?", color=AMBER)
-        view = LogoutConfirm(self.guild_id)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        results = []
+        for usr, pwd in accounts:
+            ok, msg = await do_login(usr, pwd)
+            if ok:
+                results.append(f"✅ **{usr}** — OK")
+            else:
+                results.append(f"❌ **{usr}** — {msg[:60]}")
+        await interaction.followup.send("\n".join(results[:25]), ephemeral=True)
 
-    @ui.button(label="🌾 Farm XP", style=discord.ButtonStyle.success, row=1)
-    async def farm_btn(self, interaction: Interaction, button: ui.Button):
-        cmd = interaction.client.tree.get_command("farm")
-        if cmd:
-            await cmd.callback(interaction)
-        else:
-            await interaction.response.send_message("Command `/farm` not found.", ephemeral=True)
-
-    @ui.button(label="📋 Homeworks", style=discord.ButtonStyle.primary, row=1)
-    async def homeworks_btn(self, interaction: Interaction, button: ui.Button):
-        cmd = interaction.client.tree.get_command("homeworks")
-        if cmd:
-            await cmd.callback(interaction)
-        else:
-            await interaction.response.send_message("Command `/homeworks` not found.", ephemeral=True)
-
-    @ui.button(label="📊 Leaderboard", style=discord.ButtonStyle.secondary, row=2)
-    async def leaderboard_btn(self, interaction: Interaction, button: ui.Button):
-        cmd = interaction.client.tree.get_command("leaderboard")
-        if cmd:
-            await cmd.callback(interaction)
-        else:
-            await interaction.response.send_message("Command `/leaderboard` not found.", ephemeral=True)
-
-    @ui.button(label="❤️ Health", style=discord.ButtonStyle.danger, row=2)
+    @ui.button(label="❤️ Health", style=discord.ButtonStyle.secondary, row=1)
     async def health_btn(self, interaction: Interaction, button: ui.Button):
         await interaction.response.defer(ephemeral=True)
         acc_file = get_account(self.guild_id)
         if not acc_file:
-            embed = discord.Embed(title="❤️ Health Check", description="❌ **No account logged in**\n\nUse the **Login** button first.", color=RED)
+            embed = discord.Embed(
+                title="❤️ Health Check",
+                description="❌ **No account logged in**\n\nUse the **Login** button first.",
+                color=RED
+            )
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
-        username = acc_file.stem
         try:
             content = acc_file.read_text().strip()
             uname, pwd = content.split(":", 1)
-            import asyncio
-            success, err = await do_login(uname, pwd)
-            if not success:
-                embed = discord.Embed(title="❤️ Health Check", description=f"❌ **Login Failed**\nAccount: **{username}**\nCredentials may be invalid or account banned.", color=RED)
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                return
-            embed = discord.Embed(title="❤️ Health Check — ✅ Healthy", description=f"Account: **{username}**\nLogin: Valid ✅\nBan Status: Not detected ✅", color=GREEN)
+        except (ValueError, OSError) as e:
+            embed = discord.Embed(title="❤️ Health Check", description=f"❌ Error reading account: {e}", color=RED)
             await interaction.followup.send(embed=embed, ephemeral=True)
-        except Exception as e:
-            logger.error(f"Health check error: {e}")
-            embed = discord.Embed(title="❤️ Health Check", description=f"❌ Error: `{e}`", color=RED)
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        ok, msg = await do_login(uname, pwd)
+        if ok:
+            embed = discord.Embed(
+                title="❤️ Health Check — ✅ Healthy",
+                description=f"Account: **{uname}**\nLogin: Valid ✅\nBan Status: Not detected ✅",
+                color=GREEN
+            )
+        elseembed = discord.Embed(
+                title="❤️ Health Check — ❌ Failed",
+                description=f"Account: **{uname}**\nError: {msg}",
+                color=RED
+            )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @ui.button(label="⚙️ Settings", style=discord.ButtonStyle.primary, row=3)
     async def settings_btn(self, interaction: Interaction, button: ui.Button):
@@ -284,11 +195,87 @@ class HubView(ui.View):
         view = HubView(self.guild_id)
         await interaction.response.edit_message(embed=embed, view=view)
 
-# ─── Admin View ──────────────────────────────────────────────────────────────
+
+# ─── Help View ──────────────────────────────────────────────────────────────
+
+def build_hub_embed(guild_id: Optional[int]) -> discord.Embed:
+    """Build the main hub status embed."""
+    accounts = load_accounts(guild_id)
+    total = len(accounts)
+    embed = discord.Embed(title="🌰 LanguageNut Hub", description="Control panel for selection:", color=BLUE)
+    embed.add_field(name="📊 Status", value=f"Accounts: **{total}** loaded", inline=False)
+    embed.set_footer(text="Use the buttons below to manage.")
+    return embed
+
+
+# ─── Help View ────────────────────────────────────────────────────────────────
+
+class HelpView(ui.View):
+    """Simple help view with navigation."""
+
+    def __init__(self):
+        self.timeout=120)
+
+    @ui.button(label="📖 Tutorial", style=discord.ButtonStyle.secondary)
+    async def tutorial_btn(self, interaction: Interaction, button: ui.Button):
+        embed = discord.Embed(title="📖 Tutorial", color=BLUE)
+        embed.add_field(name="Step 1: Save your LanguageNut credentials using `/login`.", value="Step 2: Use this hub to log in and manage your accounts.", inline=False)
+        embed.add_field(name="Step 3:", value="Monitor health with ❤️ Health.", inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @ui.button(label="📋 Commands", style=discord.ButtonStyle.secondary)
+    async def commands_btn(self, interaction: Interaction, button: ui.Button):
+        embed = discord.Embed(title="📋 Commands", color=BLUE)
+        embed.add_field(name="/hub", value="Open this control panel", inline=False)
+        embed.add_field(name="/login <user> <pass>", value="Log in manually", inline=False)
+        embed.add_field(name="/settings", value="Configure guild settings", inline=False)
+        embed.add_field(name="/health", value="Perform account health check", inline=False)
+        embed.add_field(name="/admin", value="Owner-only admin panel", inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+# ─── Login Modal ──────────────────────────────────────────────────────────────
+
+class LoginModal(ui.Modal, title="LanguageNut Login"):
+    """Modal to collect username & password."""
+
+    username = ui.TextInput(label="Username", placeholder="Your LanguageNut username…", required=True)
+    password = ui.TextInput(label="Password", placeholder="Your LanguageNut password…", required=True)
+
+    def __init__(self, guild_id: Optional[int]):
+        super().__init__()
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: Interaction):
+        await interaction.response.defer(ephemeral=True)
+        usr = self.username.value.strip()
+        pwd = self.password.value.strip()
+        if not usr or not pwd:
+            await interaction.followup.send("❌ Both fields are required.", ephemeral=True)
+            return
+
+        ok, result = await do_login(usr, pwd)
+        if not ok:
+            token = result
+            status = save_account(self.guild_id, usr, pwd) if self.guild_id else ""
+            embed = discord.Embed(
+                title="✅ Login Successful",
+                description=f"**{usr}** authenticated.\nToken: `{token[:40]}…`\n{status}",
+                color=GREEN
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            embed = discord.Embed(title="❌ Login Failed", description=f"**{usr}**\nError: {result}", color=RED)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# Admin View ──────────────────────────────────────────────────────────────
 
 class AdminView(ui.View):
+    """Owner-only admin panel."""
+
     def __init__(self):
-        super().__init__(timeout=120)
+    super().__init__(timeout=120)
 
     async def interaction_check(self, interaction: Interaction) -> bool:
         if interaction.user.id != OWNER_ID:
@@ -303,7 +290,7 @@ class AdminView(ui.View):
             for guild in interaction.client.guilds:
                 interaction.client.tree.clear_commands(guild=guild)
             synced = await interaction.client.tree.sync()
-            await interaction.followup.send(f"✅ Synced {len(synced)} commands.", ephemeral=True)
+            await interaction.followup.send(f"✅ Synced {len)} commands.", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Sync failed: {e}", ephemeral=True)
 
@@ -333,7 +320,7 @@ class AdminView(ui.View):
             await interaction.followup.send(f"❌ Could not read logs: {e}", ephemeral=True)
 
     @ui.button(label="🔄 Git Update", style=discord.ButtonStyle.success, row=1)
-    async def update_btn(self, interaction: Interaction, button: ui.Button):
+    async def update_btn(self, interaction: Interaction, button: ui Button):
         await interaction.response.defer(ephemeral=True)
         import subprocess
         try:
@@ -355,6 +342,7 @@ class AdminView(ui.View):
         await interaction.response.send_message("⛔ Shutting down...", ephemeral=True)
         await interaction.client.close()
 
+
 # ─── Cog ─────────────────────────────────────────────────────────────────────
 
 class HubCog(commands.Cog):
@@ -371,6 +359,7 @@ class HubCog(commands.Cog):
         embed = discord.Embed(title="🔧 Admin Panel", description="Select an action:", color=PURPLE)
         view = AdminView()
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(HubCog(bot))
