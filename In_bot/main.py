@@ -18,6 +18,7 @@ import aiohttp
 load_dotenv()
 
 # Set up logging
+from pathlib import Path
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
@@ -28,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('lnut-bot')
 
-from config import ACCOUNTS_DIR
+import random
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -245,7 +246,7 @@ class LNutBot(commands.Bot):
                     # Check if any guild has actual account files
                     has_accounts = False
                     for guild in self.guilds:
-                        acc_dir = ACCOUNTS_DIR / str(guild.id)
+                        acc_dir = Path("accounts") / str(guild.id)
                         if acc_dir.exists() and list(acc_dir.glob("*.txt")):
                             has_accounts = True
                             break

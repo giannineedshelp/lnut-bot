@@ -1,30 +1,30 @@
 """
-hub.py — Central hub command cog for LNutBot.
-Provides a /hub panel with all bot actions in one place.
-Fixes: merged all commands into hub, admin panel for owner, cleaner status.
+hub.py — Hub views for LNutBot.
+Provides HubView, AdminView, LoginModal, HelpView for the /hub command.
+No slash commands here — they're in commands.py.
 """
 
 import asyncio
 import logging
-import random
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import discord
 from discord import Interaction, app_commands, ui
 from discord.ext import commands
 
-from config import ACCOUNTS_DIR
 from automation.api_direct import LNApiClient, LanguagenutClient
 from automation.discover import HomeworkDiscoverer
 from automation.stealth import StealthManager, seconds_to_human
-from commands.commands import SettingsView, get_session, _check_account_banned
+from commands.commands import get_session, _check_account_banned
 from utils.helper import format_homework_list, _is_done
 from utils.logger import setup_logging, log_user_command
 
 logger = logging.getLogger(__name__)
 
 OWNER_ID = 1453752725324955656
+ACCOUNTS_DIR = Path("accounts")
 
 # Colour palette
 GREEN = discord.Colour(0x00FF88)
@@ -45,21 +45,25 @@ def get_account(guild_id: int):
     acc_files = list(acc_dir.glob("*.txt"))
     return acc_files[0] if acc_files else None
 
-async def get_api_client(guild_id: int) -> LNApiClient:
-    acc_file = get_account(guild_id)
-    if not acc_file:
-        return None
-    try:
-        content = acc_file.read_text().strip()
-        username, password = content.split(":", 1)
-        client = LNApiClient(username, password)
-        success = await client.login()
-        if success:
-            return client
-        return None
-    except Exception as e:
-        logger.error(f"Failed to create API client: {e}")
-        return None
+async def do_login(username: str, password: str) -> tuple[bool, str]:
+    """Login using the sync LanguagenutClient wrapped in executor."""
+    def _sync_login():
+        try:
+            client = LanguagenutClient()
+            resp = client.session.post(
+                "https://api.languagenut.com/loginController/attemptLogin",
+                json={"username": username, "pass": password},
+                timeout=30
+            )
+            data = resp.json()
+            if resp.status_code == 200 and data.get("newToken"):
+                client.token = data["newToken"]
+                client.session.headers["Authorization"] = f"Bearer {client.token}"
+                return True, ""
+            return False, data.get("error", str(data))[:200]
+        except Exception as e:
+            return False, str(e)[:200]
+    return await asyncio.get_event_loop().run_in_executor(None, _sync_login)
 
 # ─── Modals ──────────────────────────────────────────────────────────────────
 
@@ -76,15 +80,13 @@ class LoginModal(ui.Modal, title="Login to LanguageNut"):
         acc_dir = get_guild_accounts_dir(self.guild_id)
         acc_dir.mkdir(parents=True, exist_ok=True)
         acc_file = acc_dir / f"{self.username.value}.txt"
-        acc_file.write_text(f"{self.username.value}:{self.password.value}")
-        client = LNApiClient(self.username.value, self.password.value)
-        success = await client.login()
+        success, err = await do_login(self.username.value, self.password.value)
         if success:
+            acc_file.write_text(f"{self.username.value}:{self.password.value}")
             embed = discord.Embed(title="✅ Login Successful", description=f"Logged in as **{self.username.value}**", color=GREEN)
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-            acc_file.unlink(missing_ok=True)
-            embed = discord.Embed(title="❌ Login Failed", description="Invalid credentials. Check your username and password.", color=RED)
+            embed = discord.Embed(title="❌ Login Failed", description=f"Invalid credentials.\n`{err}`", color=RED)
             await interaction.followup.send(embed=embed, ephemeral=True)
 
 class LogoutConfirm(ui.View):
@@ -102,7 +104,7 @@ class LogoutConfirm(ui.View):
 
     @ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: Interaction, button: ui.Button):
-        embed = discord.Embed(title="Cancelled", description="Logout cancelled.", color=discord.Color.yellow())
+        embed = discord.Embed(title="Cancelled", description="Logout cancelled.", color=AMBER)
         await interaction.response.edit_message(embed=embed, view=None)
 
 # ─── Help View ───────────────────────────────────────────────────────────────
@@ -177,12 +179,12 @@ def build_hub_embed(guild_id: int) -> discord.Embed:
         color=BLUE,
         timestamp=discord.utils.utcnow(),
     )
-    embed.add_field(name="🔑 Login / 🚪 Logout", value="Manage your LanguageNut account", inline=True)
-    embed.add_field(name="🌾 Farm XP", value="Farm tasks for XP points", inline=True)
-    embed.add_field(name="📋 Homeworks", value="View your assignments", inline=True)
+    embed.add_field(name="🔑 Login / 🚪 Logout", value="Manage your account", inline=True)
+    embed.add_field(name="🌾 Farm XP", value="Farm tasks for XP", inline=True)
+    embed.add_field(name="📋 Homeworks", value="View assignments", inline=True)
     embed.add_field(name="📊 Leaderboard", value="Check rankings", inline=True)
     embed.add_field(name="❤️ Health", value="Account status check", inline=True)
-    embed.add_field(name="⚙️ Settings", value="Adjust bot parameters", inline=True)
+    embed.add_field(name="⚙️ Settings", value="Adjust parameters", inline=True)
     embed.set_footer(text="LanguageNut Hub")
     return embed
 
@@ -204,10 +206,10 @@ class HubView(ui.View):
     async def logout_btn(self, interaction: Interaction, button: ui.Button):
         acc_file = get_account(self.guild_id)
         if not acc_file:
-            embed = discord.Embed(title="Not Logged In", description="You are not currently logged in.", color=discord.Color.yellow())
+            embed = discord.Embed(title="Not Logged In", description="You are not currently logged in.", color=AMBER)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        embed = discord.Embed(title="Confirm Logout", description=f"Log out **{acc_file.stem}**?", color=discord.Color.orange())
+        embed = discord.Embed(title="Confirm Logout", description=f"Log out **{acc_file.stem}**?", color=AMBER)
         view = LogoutConfirm(self.guild_id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
@@ -247,48 +249,13 @@ class HubView(ui.View):
         try:
             content = acc_file.read_text().strip()
             uname, pwd = content.split(":", 1)
-            client = LNApiClient(uname, pwd)
-            login_ok = await client.login()
-            if not login_ok:
+            import asyncio
+            success, err = await do_login(uname, pwd)
+            if not success:
                 embed = discord.Embed(title="❤️ Health Check", description=f"❌ **Login Failed**\nAccount: **{username}**\nCredentials may be invalid or account banned.", color=RED)
                 await interaction.followup.send(embed=embed, ephemeral=True)
                 return
-            try:
-                info = await client.api.get_profile()
-            except AttributeError:
-                info = {}
-            is_banned = False
-            ban_reason = None
-            ban_time_left = None
-            if isinstance(info, dict):
-                if info.get("banned") or info.get("isBanned") or info.get("ban"):
-                    is_banned = True
-                    ban_data = info.get("ban", info)
-                    if isinstance(ban_data, dict):
-                        ban_reason = ban_data.get("reason") or ban_data.get("reasonText")
-                        ban_until = ban_data.get("until") or ban_data.get("expires")
-                        if ban_until:
-                            try:
-                                if isinstance(ban_until, (int, float)):
-                                    ban_dt = datetime.fromtimestamp(ban_until / 1000, tz=timezone.utc)
-                                else:
-                                    ban_dt = datetime.fromisoformat(str(ban_until).replace("Z", "+00:00"))
-                                now = datetime.now(timezone.utc)
-                                remaining = ban_dt - now
-                                if remaining.total_seconds() > 0:
-                                    hours, rem = divmod(int(remaining.total_seconds()), 3600)
-                                    minutes = rem // 60
-                                    ban_time_left = f"{hours}h {minutes}m"
-                                else:
-                                    ban_time_left = "Expiring soon"
-                            except (ValueError, TypeError):
-                                ban_time_left = str(ban_until)
-            if is_banned:
-                reason_text = f"\nReason: {ban_reason}" if ban_reason else ""
-                timer_text = f"\nTime remaining: {ban_time_left}" if ban_time_left else ""
-                embed = discord.Embed(title="❤️ Health Check — 🚫 BANNED", description=f"Account: **{username}**{reason_text}{timer_text}", color=RED)
-            else:
-                embed = discord.Embed(title="❤️ Health Check — ✅ Healthy", description=f"Account: **{username}**\nToken: Valid ✅\nBan Status: Not banned ✅", color=GREEN)
+            embed = discord.Embed(title="❤️ Health Check — ✅ Healthy", description=f"Account: **{username}**\nLogin: Valid ✅\nBan Status: Not detected ✅", color=GREEN)
             await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as e:
             logger.error(f"Health check error: {e}")
@@ -297,9 +264,11 @@ class HubView(ui.View):
 
     @ui.button(label="⚙️ Settings", style=discord.ButtonStyle.primary, row=3)
     async def settings_btn(self, interaction: Interaction, button: ui.Button):
-        view = SettingsView(self.guild_id)
-        embed = view.build_embed(self.guild_id)
-        await interaction.response.edit_message(embed=embed, view=view)
+        cmd = interaction.client.tree.get_command("settings")
+        if cmd:
+            await cmd.callback(interaction)
+        else:
+            await interaction.response.send_message("Command `/settings` not found.", ephemeral=True)
 
     @ui.button(label="❓ Help", style=discord.ButtonStyle.secondary, row=3)
     async def help_btn(self, interaction: Interaction, button: ui.Button):
@@ -331,7 +300,6 @@ class AdminView(ui.View):
     async def sync_btn(self, interaction: Interaction, button: ui.Button):
         await interaction.response.defer(ephemeral=True)
         try:
-            # Clear old cached commands first
             for guild in interaction.client.guilds:
                 interaction.client.tree.clear_commands(guild=guild)
             synced = await interaction.client.tree.sync()
@@ -390,16 +358,10 @@ class AdminView(ui.View):
 # ─── Cog ─────────────────────────────────────────────────────────────────────
 
 class HubCog(commands.Cog):
-    """Cog for the /hub command."""
+    """Cog that provides the admin panel command. The /hub command is in commands.py."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-
-    @app_commands.command(name="hub", description="Open the LanguageNut control hub")
-    async def hub(self, interaction: Interaction):
-        embed = build_hub_embed(interaction.guild_id)
-        view = HubView(interaction.guild_id)
-        await interaction.response.send_message(embed=embed, view=view)
 
     @app_commands.command(name="admin", description="Open the admin control panel (owner only)")
     async def admin(self, interaction: Interaction):
