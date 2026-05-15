@@ -2,9 +2,7 @@ import math
 import random
 from datetime import datetime, timedelta, timezone
 
-
 def _pct(task: dict) -> int:
-    """Safely extract completion percentage from a task as an int (0-100)."""
     gr = task.get("gameResults")
     if not gr:
         return 0
@@ -14,23 +12,16 @@ def _pct(task: dict) -> int:
     except (ValueError, TypeError):
         return 0
 
-
 def _is_done(task: dict) -> bool:
-    """A task is done when its completion percentage is >= 100."""
     return _pct(task) >= 100
 
-
 def extract_task_id(task) -> str:
-    """Extract a readable identifier for a task."""
     uid = task.get("gameUid", "") or task.get("uid", "") or ""
     return uid[:12] + "..." if len(uid) > 12 else uid
 
-
 def format_homework_list(homeworks: list) -> str:
-    """Format homeworks into a Discord-friendly string."""
     if not homeworks:
         return "No homeworks found."
-
     lines = []
     for hw in homeworks:
         name = hw.get("name", "Unnamed")
@@ -45,14 +36,12 @@ def format_homework_list(homeworks: list) -> str:
         lines.append(f"  Progress: {completed}/{total} tasks")
         for i, task in enumerate(tasks):
             task_name = task.get("translation", "Unknown")
-            pct = task.get("gameResults", {}).get("percentage", "-") if task.get("gameResults") else "—"
-            lines.append(f"  `[{i}]` {task_name} — {pct}%")
+            pct = task.get("gameResults", {}).get("percentage", "-") if task.get("gameResults") else "\u2014"
+            lines.append(f"  `[{i}]` {task_name} \u2014 {pct}%")
         lines.append("")
     return "\n".join(lines)
 
-
 def seconds_to_string(seconds: float) -> str:
-    """Convert seconds to a human-readable duration string."""
     if seconds < 1:
         return f"{int(seconds * 1000)}ms"
     parts = []
@@ -61,26 +50,17 @@ def seconds_to_string(seconds: float) -> str:
     numhours = int(((seconds % 31536000) % 86400) // 3600)
     numminutes = int((((seconds % 31536000) % 86400) % 3600) // 60)
     numseconds = int((((seconds % 31536000) % 86400) % 3600) % 60)
-
-    if numyears:
-        parts.append(f"{numyears}y")
-    if numdays:
-        parts.append(f"{numdays}d")
-    if numhours:
-        parts.append(f"{numhours}h")
-    if numminutes:
-        parts.append(f"{numminutes}m")
+    if numyears: parts.append(f"{numyears}y")
+    if numdays: parts.append(f"{numdays}d")
+    if numhours: parts.append(f"{numhours}h")
+    if numminutes: parts.append(f"{numminutes}m")
     parts.append(f"{numseconds}s")
     return " ".join(parts)
 
-
 def cooldown_timestamp(seconds: float) -> str:
-    """Return a Discord relative timestamp for when cooldown ends."""
     dt = datetime.now(timezone.utc) + timedelta(seconds=seconds)
     timestamp = int(dt.timestamp())
     return f"<t:{timestamp}:R>"
 
-
 def random_delay_ms(min_ms: float, max_ms: float) -> float:
-    """Generate a random delay in milliseconds within range."""
     return random.uniform(min_ms, max_ms)
