@@ -47,10 +47,7 @@ def get_session(uid: int) -> dict:
 def _lnut_post(endpoint: str, payload: dict) -> dict:
     """Make a sync POST to languagenut API."""
     try:
-        try:
-    import curl_cffi.requests as cr
-except ImportError:
-    import requests as cr
+        import curl_cffi.requests as cr
     except ImportError:
         import requests as cr
 
