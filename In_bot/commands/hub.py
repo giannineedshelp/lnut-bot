@@ -301,6 +301,15 @@ class HubCog(commands.Cog):
         view = AdminView()
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+
+
+    @app_commands.command(name="hub", description="Open the LanguageNut control hub")
+    async def hub(self, interaction: Interaction):
+        embed = build_hub_embed(interaction.guild_id)
+        view = HubView(interaction.guild_id)
+        await interaction.response.send_message(embed=embed, view=view)
+
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(HubCog(bot))
     logger.info("HubCog loaded")
