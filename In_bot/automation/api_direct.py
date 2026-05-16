@@ -1,356 +1,227 @@
-"""
-api_direct.py — Direct HTTP client for LanguageNut API with TLS fingerprint spoofing.
+"""Direct API client for LanguageNut.com - handles all HTTP communication"""
 
-Uses curl_cffi to mimic browser TLS/JA3 fingerprints and evade Cloudflare Bot Management.
-Falls back to standard requests if curl_cffi is not available.
-"""
-
-import logging
+import asyncio
+import json
 import random
 import time
-from typing import Optional, Dict, Any, List, Tuple
-from urllib.parse import urljoin
+import logging
 
-logger = logging.getLogger("lnut_bot.api_direct")
+logger = logging.getLogger(__name__)
 
-# Try to use curl_cffi for TLS fingerprint impersonation
 try:
-    import curl_cffi.requests as curl_requests
-    HAS_CURL_CFFI = True
-    logger.info("Using curl_cffi for TLS fingerprint impersonation")
+    import aiohttp
+    HAS_AIOHTTP = True
 except ImportError:
-    import requests as curl_requests
-    HAS_CURL_CFFI = False
-    logger.warning("curl_cffi not available, using standard requests (weak TLS fingerprint)")
-
-# API Base URLs
-API_BASE = "https://api.languagenut.com"
-LIVE_BASE = "https://live.languagenut.com"
-
-# Realistic browser headers
-API_HEADERS = {
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-GB,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Origin": "https://www.languagenut.com",
-    "Referer": "https://www.languagenut.com/",
-    "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-}
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-]
+    HAS_AIOHTTP = False
+    logger.warning("aiohttp not installed. Install with: pip install aiohttp")
 
 
-class LanguagenutClient:
-    """
-    HTTP client for LanguageNut API with browser fingerprint mimicry.
+class LNApiClient:
+    """API client for LanguageNut.com"""
 
-    Handles authentication, session management, and API requests
-    with realistic browser-like behavior.
-    """
+    def __init__(self, base_url: str = None):
+        self.base_url = base_url or "https://www.languagenut.com/resources/en-gb"
+        self.token = None
+        self.username = None
+        self.logged_in = False
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.6; rv:127.0) Gecko/20100101 Firefox/127.0",
+        ]
 
-    def __init__(self, stealth=None, guild_id: int = 0):
-        self.session = self._create_session()
-        self.token: Optional[str] = None
-        self.refresh_token: Optional[str] = None
-        self.token_expiry: Optional[float] = None
-        self.username: Optional[str] = None
-        self.last_request_time: float = 0
-        self.stealth = stealth
-        self.guild_id = guild_id
+    def _get_user_agent(self) -> str:
+        return random.choice(self.user_agents)
 
-    def _create_session(self):
-        """Create an HTTP session with browser-like configuration."""
-        if HAS_CURL_CFFI:
-            session = curl_requests.Session(impersonate="chrome125")
-        else:
-            session = curl_requests.Session()
-        return session
-
-    def _rotate_user_agent(self):
-        """Rotate user agent periodically to avoid fingerprinting."""
-        ua = random.choice(USER_AGENTS)
-        self.session.headers.update({"User-Agent": ua})
-
-    def _apply_headers(self, headers: dict):
-        """Apply headers to the session."""
-        for key, value in headers.items():
-            self.session.headers[key] = value
-
-    def _throttle(self):
-        """Ensure minimum gap between requests (human-like pacing)."""
-        now = time.time()
-        gap = now - self.last_request_time
-        min_gap = random.uniform(0.5, 2.0)
-        if gap < min_gap:
-            time.sleep(min_gap - gap)
-        self.last_request_time = time.time()
-
-    # ------------------------------------------------------------------
-    # Authentication
-    # ------------------------------------------------------------------
-
-    def login(self, username: str, password: str) -> Tuple[bool, Optional[str]]:
-        """
-        Authenticate with LanguageNut.
-
-        Returns (success, error_message).
-        """
-        self.username = username
-        self._rotate_user_agent()
-        self._apply_headers(API_HEADERS)
-
-        url = urljoin(API_BASE, "/auth/login")
-        payload = {
-            "username": username,
-            "password": password,
+    def _get_headers(self, content_type: str = None) -> dict:
+        headers = {
+            "User-Agent": self._get_user_agent(),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-GB,en;q=0.9",
+            "Referer": f"{self.base_url}/index.html",
+            "Origin": "https://www.languagenut.com",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
         }
+        if content_type:
+            headers["Content-Type"] = content_type
+        return headers
 
-        self._throttle()
+    # --- Sync methods (for curl_cffi / requests fallback) ---
+
+    def _get(self, endpoint: str, params: dict = None) -> dict:
+        """Sync GET request - used by old/legacy code paths"""
+        import requests
+
+        url = f"{self.base_url}/{endpoint}"
+        headers = self._get_headers()
 
         try:
-            resp = self.session.post(url, json=payload, timeout=30)
-            data = resp.json()
-        except Exception as e:
-            return False, f"Connection error: {str(e)[:100]}"
+            from curl_cffi import requests as curl_requests
+            resp = curl_requests.get(url, params=params, headers=headers, impersonate="chrome125", timeout=15)
+        except ImportError:
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
 
-        if resp.status_code == 200 and data.get("token"):
-            self.token = data["token"]
-            self.refresh_token = data.get("refreshToken")
-            self.session.headers["Authorization"] = f"Bearer {self.token}"
-            logger.info(f"Successfully logged in as {username}")
-            return True, None
-        elif resp.status_code == 403 or "ACCOUNT_BLOCKED" in str(data):
-            return False, "ACCOUNT_BLOCKED"
+        if resp.status_code == 200:
+            return resp.json()
+        raise Exception(f"GET {endpoint} returned {resp.status_code}: {resp.text[:200]}")
+
+    def _post(self, endpoint: str, data: dict = None) -> dict:
+        """Sync POST request (form-encoded) - used by old/legacy code paths"""
+        import requests
+
+        url = f"{self.base_url}/{endpoint}"
+        headers = self._get_headers("application/x-www-form-urlencoded; charset=UTF-8")
+
+        try:
+            from curl_cffi import requests as curl_requests
+            resp = curl_requests.post(url, data=data, headers=headers, impersonate="chrome125", timeout=15)
+        except ImportError:
+            resp = requests.post(url, data=data, headers=headers, timeout=15)
+
+        if resp.status_code == 200:
+            return resp.json()
+        raise Exception(f"POST {endpoint} returned {resp.status_code}: {resp.text[:200]}")
+
+    # --- Async methods (for XP farm / modern code paths) ---
+
+    async def _get_async(self, endpoint: str, params: dict = None) -> dict:
+        """Async GET request to LanguageNut API"""
+        if not HAS_AIOHTTP:
+            # Fallback to sync in threadpool
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, self._get, endpoint, params)
+
+        url = f"{self.base_url}/{endpoint}"
+        headers = self._get_headers()
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                text = await resp.text()
+                raise Exception(f"GET {endpoint} returned {resp.status}: {text[:200]}")
+
+    async def _post_async(self, endpoint: str, data: dict = None) -> dict:
+        """Async POST request (form-encoded)"""
+        if not HAS_AIOHTTP:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, self._post, endpoint, data)
+
+        url = f"{self.base_url}/{endpoint}"
+        headers = self._get_headers("application/x-www-form-urlencoded; charset=UTF-8")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                data=data,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                text = await resp.text()
+                raise Exception(f"POST {endpoint} returned {resp.status}: {text[:200]}")
+
+    # --- Auth methods ---
+
+    async def login(self, username: str, password: str) -> dict:
+        """Login to LanguageNut. Returns the login response dict."""
+        result = await self._post_async("loginController/attemptLogin", {
+            "username": username,
+            "pass": password,
+        })
+        if result and "token" in result:
+            self.token = result["token"]
+            self.username = username
+            self.logged_in = True
+            logger.info(f"Logged in as {username}")
         else:
-            return False, f"Login failed: {data.get('message', str(data)[:200])}"
+            error = result.get("error", "UNKNOWN") if result else "NO_RESPONSE"
+            logger.warning(f"Login failed for {username}: {error}")
+            raise Exception(f"Login failed: {error}")
+        return result
 
-    def refresh_auth(self) -> bool:
-        """Refresh the authentication token."""
-        if not self.refresh_token:
-            return False
-        url = urljoin(API_BASE, "/auth/refresh")
-        payload = {"refreshToken": self.refresh_token}
-        try:
-            resp = self.session.post(url, json=payload, timeout=30)
-            data = resp.json()
-            if resp.status_code == 200 and data.get("token"):
-                self.token = data["token"]
-                self.session.headers["Authorization"] = f"Bearer {self.token}"
-                return True
-        except Exception:
-            pass
-        return False
+    def login_sync(self, username: str, password: str) -> dict:
+        """Sync login (for legacy code paths)"""
+        result = self._post("loginController/attemptLogin", {
+            "username": username,
+            "pass": password,
+        })
+        if result and "token" in result:
+            self.token = result["token"]
+            self.username = username
+            self.logged_in = True
+        return result
 
-    # ------------------------------------------------------------------
-    # API Methods (sync — used by commands.py/discover.py)
-    # ------------------------------------------------------------------
+    # --- Game data methods ---
 
-    def call_lnut(self, endpoint: str, params: dict = None) -> dict:
-        """
-        Generic API call to LanguageNut.
+    async def get_game_vocab(self, curriculum_uid: int, product: str = "secondary") -> dict:
+        """Fetch vocabulary questions for XP farming"""
+        if not self.token:
+            raise Exception("Not logged in. Call login() first.")
 
-        endpoint: e.g. "assignmentController/getViewableAll"
-        params: dict of query/post parameters, must include "token" if needed
-        """
-        if params is None:
-            params = {}
-
-        url = urljoin(API_BASE, f"/{endpoint}")
-        self._throttle()
-
-        token = params.pop("token", self.token)
-        headers = {}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        try:
-            resp = self.session.post(url, json=params, headers=headers, timeout=30)
-            data = resp.json()
-            if resp.status_code == 200:
-                return data
-            else:
-                return {"error": True, "status": resp.status_code, "body": data}
-        except Exception as e:
-            return {"error": True, "body": str(e)}
-
-    def fetch_task_data(self, task: dict, game_link: str = "", to_lang: str = "") -> Optional[list]:
-        """
-        Fetch vocab data for a task.
-
-        Returns list of vocab items or None on failure.
-        """
-        task_type = self._resolve_task_type(task)
-        uid = task.get("gameUid", "") or task.get("uid", "")
-
-        common_params = {
+        timestamp = int(time.time() * 1000)
+        params = {
+            "curriculumUid": curriculum_uid,
+            "product": product,
+            "_": timestamp,
             "token": self.token,
         }
+        return await self._get_async("gameDataController/getGameVocab", params=params)
 
-        if task_type == "sentence":
-            common_params["sentenceCatalogUid"] = uid
-            endpoint = "sentenceCatalogController/getSentence"
-        elif task_type == "verb":
-            common_params["verbUid"] = uid
-            endpoint = "verbController/getVerb"
-        elif task_type == "phonic":
-            common_params["phonicCatalogUid"] = uid
-            endpoint = "phonicCatalogController/getPhonic"
-        elif task_type == "exam":
-            common_params["examUid"] = uid
-            endpoint = "examController/getExam"
-        else:
-            # Default: vocab task
-            common_params["gameUid"] = uid
-            common_params["toLanguage"] = to_lang or "en"
-            endpoint = "gameDataController/getGameVocab"
+    async def add_game_score(
+        self,
+        correct_uids: list,
+        incorrect_uids: list,
+        product: str = "secondary",
+    ) -> dict:
+        """Submit a game score to earn XP"""
+        if not self.token:
+            raise Exception("Not logged in. Call login() first.")
 
-        data = self.call_lnut(endpoint, common_params)
-        if data.get("error"):
-            logger.warning(f"fetch_task_data failed for {uid}: {data.get('body', '')[:100]}")
-            return None
+        from datetime import datetime, timezone
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-        # Extract vocab list from response
-        vocabs = data.get("vocabs", data.get("sentences", data.get("items", [])))
-        if not vocabs:
-            vocabs = [data] if isinstance(data, dict) and data.get("uid") else []
-        return vocabs if vocabs else None
-
-    def submit_score(self, task_data: dict) -> dict:
-        """
-        Submit a completed task score.
-
-        task_data should be the full submission payload.
-        Returns the API response dict.
-        """
-        url = urljoin(API_BASE, "/tasks/submit")
-        self._throttle()
-        try:
-            resp = self.session.post(
-                url, json=task_data,
-                headers={"Authorization": f"Bearer {self.token}"},
-                timeout=30
-            )
-            data = resp.json()
-            if resp.status_code == 200:
-                return data
-            else:
-                return {"error": True, "status": resp.status_code, "body": data}
-        except Exception as e:
-            return {"error": True, "body": str(e)}
-
-    # ------------------------------------------------------------------
-    # Legacy sync submit (used by commands.py)
-    # ------------------------------------------------------------------
-
-    def submit_score_legacy(self, token: str, task: dict) -> dict:
-        """Legacy submit wrapper (used by old dashboard commands)."""
-        payload = {
-            "token": token,
-            "taskUid": task.get("gameUid", ""),
-            "gameLink": task.get("gameLink", ""),
-            "percentage": 100,
-            "timeSpent": random.randint(30000, 120000),
+        data = {
+            "correctVocabUids": json.dumps(correct_uids),
+            "incorrectVocabUids": json.dumps(incorrect_uids),
+            "timeStamp": timestamp,
+            "dontStoreStats": "false",
+            "product": product,
+            "token": self.token,
         }
-        return self.call_lnut("assignmentController/submitTask", payload)
+        return await self._post_async("gameDataController/addGameScore", data=data)
 
-    # ------------------------------------------------------------------
-    # Assignment Methods
-    # ------------------------------------------------------------------
+    # --- Assignment methods ---
 
-    def get_assignments(self) -> Tuple[bool, Any]:
-        """Fetch available assignments."""
-        url = urljoin(API_BASE, "/assignments")
-        self._throttle()
-        try:
-            resp = self.session.get(url, timeout=30)
-            return resp.status_code == 200, resp.json()
-        except Exception as e:
-            return False, str(e)
+    async def get_assignments(self) -> dict:
+        """Get viewable assignments"""
+        if not self.token:
+            raise Exception("Not logged in.")
+        return await self._get_async("assignmentController/getViewableAll", params={"token": self.token})
 
-    def get_assignment_tasks(self, assignment_id: str) -> Tuple[bool, Any]:
-        """Fetch tasks for a specific assignment."""
-        url = urljoin(API_BASE, f"/assignments/{assignment_id}/tasks")
-        self._throttle()
-        try:
-            resp = self.session.get(url, timeout=30)
-            return resp.status_code == 200, resp.json()
-        except Exception as e:
-            return False, str(e)
+    # --- Stats / Profile ---
 
-    def submit_task(self, task_data: dict) -> Tuple[bool, Any]:
-        """Submit a completed task (returns tuple for backward compat)."""
-        result = self.submit_score(task_data)
-        if result.get("error"):
-            return False, result.get("body", "Unknown error")
-        return True, result
+    async def get_stats(self) -> dict:
+        """Get user stats"""
+        if not self.token:
+            raise Exception("Not logged in.")
+        return await self._get_async("stats/get", params={"token": self.token})
 
-    def get_leaderboard(self) -> Tuple[bool, Any]:
-        """Fetch leaderboard data."""
-        url = urljoin(API_BASE, "/leaderboard")
-        self._throttle()
-        try:
-            resp = self.session.get(url, timeout=30)
-            return resp.status_code == 200, resp.json()
-        except Exception as e:
-            return False, str(e)
-
-    def get_profile(self) -> Tuple[bool, Any]:
-        """Fetch user profile."""
-        url = urljoin(API_BASE, "/auth/me")
-        self._throttle()
-        try:
-            resp = self.session.get(url, timeout=30)
-            return resp.status_code == 200, resp.json()
-        except Exception as e:
-            return False, str(e)
-
-    # ------------------------------------------------------------------
-    # Task Type Resolution
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _resolve_task_type(task: dict) -> str:
-        """Determine task type from gameLink."""
-        game_link = task.get("gameLink", "")
-        patterns = {
-            "sentence": "sentenceCatalog",
-            "verb": "verbUid",
-            "phonic": "phonicCatalogUid",
-            "exam": "examUid",
-        }
-        for task_type, pattern in patterns.items():
-            if pattern in game_link:
-                return task_type
-        return "vocabs"
-
-    # ------------------------------------------------------------------
-    # Session Management
-    # ------------------------------------------------------------------
-
-    def logout(self):
-        """Clean up session."""
-        if self.session:
-            try:
-                self.session.close()
-            except Exception:
-                pass
-        self.token = None
-        self.refresh_token = None
-        self.username = None
-
-
-# ======================================================================
-# ALIAS for backward compatibility with files importing LNApiClient
-# ======================================================================
-LNApiClient = LanguagenutClient
+    async def get_profile(self) -> dict:
+        """Get user profile"""
+        if not self.token:
+            raise Exception("Not logged in.")
+        return await self._get_async("profile/get", params={"token": self.token})
